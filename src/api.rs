@@ -379,7 +379,8 @@ pub async fn finish_replace(
         .finish_upload(&r.video_key, &r.upload_id, &c.etags)
         .await
         .map_err(|e| ApiError::new(StatusCode::CONFLICT, format!("The upload isn't complete ({e}).")))?;
-    let whole = app.storage.size(&r.video_key).await.map_err(|e| ApiError::internal("bucket", e))? == Some(r.size as u64);
+    let whole =
+        app.storage.size(&r.video_key).await.map_err(|e| ApiError::internal("bucket", e))? == Some(r.size as u64);
     let mp4 = whole && is_mp4(&app.storage.head_bytes(&r.video_key, 12).await.unwrap_or_default());
     if !mp4 {
         let _ = cleanup::drop_replacement(&app, &r).await;

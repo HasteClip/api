@@ -187,10 +187,12 @@ pub async fn add_replacement(db: &PgPool, r: &NewClip<'_>) -> sqlx::Result<()> {
 }
 
 pub async fn replacement(db: &PgPool, clip_id: &str) -> sqlx::Result<Option<Replacement>> {
-    sqlx::query_as("select clip_id, video_key, thumb_key, upload_id, size, thumb_size from replacements where clip_id = $1")
-        .bind(clip_id)
-        .fetch_optional(db)
-        .await
+    sqlx::query_as(
+        "select clip_id, video_key, thumb_key, upload_id, size, thumb_size from replacements where clip_id = $1",
+    )
+    .bind(clip_id)
+    .fetch_optional(db)
+    .await
 }
 
 pub async fn delete_replacement(db: &PgPool, clip_id: &str) -> sqlx::Result<()> {
@@ -482,7 +484,10 @@ mod tests {
 
         apply_replacement(&db, "aaaaaaaaaa", true, 3600.0).await.unwrap();
         let c = clip(&db, "aaaaaaaaaa").await.unwrap().unwrap();
-        assert_eq!((c.video_key.as_str(), c.thumb_key.as_deref(), c.size, c.duration_ms), ("clips/aaaaaaaaaa/v2.mp4", Some("clips/aaaaaaaaaa/v2.jpg"), 60, 12_000));
+        assert_eq!(
+            (c.video_key.as_str(), c.thumb_key.as_deref(), c.size, c.duration_ms),
+            ("clips/aaaaaaaaaa/v2.mp4", Some("clips/aaaaaaaaaa/v2.jpg"), 60, 12_000)
+        );
         assert_eq!((c.title.as_str(), c.version), ("Ace clutch (trimmed)", 2));
         assert!(replacement(&db, "aaaaaaaaaa").await.unwrap().is_none());
         // The old files wait an hour before they go.
@@ -502,7 +507,10 @@ mod tests {
             add_clip(&db, &new_clip(id, u, 1)).await.unwrap();
             add_replacement(&db, &new_clip(id, u, 1)).await.unwrap();
         }
-        sqlx::query("update replacements set created_at = now() - interval '2 days' where clip_id = 'aaaaaaaaaa'").execute(&db).await.unwrap();
+        sqlx::query("update replacements set created_at = now() - interval '2 days' where clip_id = 'aaaaaaaaaa'")
+            .execute(&db)
+            .await
+            .unwrap();
         let stale: Vec<String> = stale_replacements(&db).await.unwrap().into_iter().map(|r| r.clip_id).collect();
         assert_eq!(stale, ["aaaaaaaaaa"]);
         // A clip that goes takes its replacement with it.
