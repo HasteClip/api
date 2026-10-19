@@ -38,7 +38,7 @@ pub async fn clip(State(app): State<Arc<App>>, Path(name): Path<String>) -> Resp
     let clip = match ready_clip(&app, id).await {
         Ok(Some(clip)) => clip,
         Ok(None) => return gone(),
-        Err(e) => return e,
+        Err(e) => return e.into_response(),
     };
     match file {
         Some(file) => watch(&app, &clip, file),
@@ -159,7 +159,7 @@ pub async fn report_form(State(app): State<Arc<App>>, Path(id): Path<String>) ->
             page(&app, &form)
         }
         Ok(None) => gone(),
-        Err(e) => e,
+        Err(e) => e.into_response(),
     }
 }
 
@@ -176,7 +176,7 @@ pub async fn report(State(app): State<Arc<App>>, Path(id): Path<String>, Form(r)
     let clip = match ready_clip(&app, &id).await {
         Ok(Some(clip)) => clip,
         Ok(None) => return gone(),
-        Err(e) => return e,
+        Err(e) => return e.into_response(),
     };
     let Some(&(reason, label)) = REASONS.iter().find(|(r_, _)| *r_ == r.reason) else {
         return (StatusCode::BAD_REQUEST, "Pick what's wrong with the clip.").into_response();
@@ -213,7 +213,7 @@ pub async fn report(State(app): State<Arc<App>>, Path(id): Path<String>, Form(r)
 
 /// A clip that's shared and finished uploading; `Ok(None)` for anything
 /// else (a wrong id, unshared, still uploading).
-async fn ready_clip(app: &App, id: &str) -> Result<Option<Clip>, Response> {
+async fn ready_clip(app: &App, id: &str) -> Result<Option<Clip>, Broken> {
     if !ids::is_clip_id(id) {
         return Ok(None);
     }
@@ -221,9 +221,17 @@ async fn ready_clip(app: &App, id: &str) -> Result<Option<Clip>, Response> {
         Ok(clip) => Ok(clip.filter(Clip::is_ready)),
         Err(e) => {
             tracing::error!("page: {e}");
-            Err((StatusCode::INTERNAL_SERVER_ERROR, "Something went wrong on our side. Try again in a bit.")
-                .into_response())
+            Err(Broken)
         }
+    }
+}
+
+/// The database didn't answer.
+struct Broken;
+
+impl IntoResponse for Broken {
+    fn into_response(self) -> Response {
+        (StatusCode::INTERNAL_SERVER_ERROR, "Something went wrong on our side. Try again in a bit.").into_response()
     }
 }
 
