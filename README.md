@@ -32,7 +32,7 @@ Everything comes from environment variables:
 | Variable | Default | |
 |---|---|---|
 | `DATABASE_URL` | (required) | Postgres |
-| `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` | (required) | The bucket. It's created on start if it isn't there yet |
+| `S3_BUCKET`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` | (required) | The bucket, which must already exist. On start, the server sets its rule that unfinished uploads are thrown away after a day |
 | `S3_REGION` | `fsn1` | |
 | `S3_ENDPOINT` | `https://<region>.your-objectstorage.com` | |
 | `SHARE_URL` | `https://clips.hasteclip.com` | Where links point |
@@ -47,6 +47,8 @@ Everything comes from environment variables:
 
 ```sh
 export DATABASE_URL=postgres://… S3_BUCKET=hasteclip-clips-dev S3_ACCESS_KEY=… S3_SECRET_KEY=…
+# Once: make the bucket (or make it in Hetzner's Console)
+curl -X PUT --aws-sigv4 aws:amz:fsn1:s3 --user "$S3_ACCESS_KEY:$S3_SECRET_KEY" https://$S3_BUCKET.fsn1.your-objectstorage.com/
 cargo run
 ```
 

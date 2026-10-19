@@ -63,15 +63,15 @@ impl Storage {
         self.bucket.base_url().origin().ascii_serialization()
     }
 
-    /// Make the bucket if it isn't there yet, and set its one rule: uploads
-    /// that never finished are thrown away after a day.
+    /// Check the bucket is there, and set its one rule: uploads that never
+    /// finished are thrown away after a day. The bucket isn't made here:
+    /// Hetzner doesn't make buckets for a signed link, only for a signed
+    /// request.
     pub async fn prepare(&self) -> Result<()> {
         let head = HeadBucket::new(&self.bucket, Some(&self.credentials)).sign(REQUEST_LIFE);
         let status = self.send(self.http.head(head)).await?.status();
         if status == reqwest::StatusCode::NOT_FOUND {
-            let create = CreateBucket::new(&self.bucket, &self.credentials).sign(REQUEST_LIFE);
-            check(self.send(self.http.put(create)).await?, "create the bucket").await?;
-            tracing::info!(bucket = self.bucket.name(), "made the bucket");
+            return Err(format!("there's no bucket called {}; make it first", self.bucket.name()));
         } else if !status.is_success() {
             return Err(format!("the bucket can't be reached: {status}"));
         }
