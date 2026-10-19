@@ -1,13 +1,18 @@
 //! What people open: a clip's page (`/<id>`), its video and thumbnail
 //! (`/<id>.mp4`, `/<id>.jpg`, which send you on to the bucket), and the
 //! report form. No scripts, no cookies, nothing tracked but a view count.
+//!
+//! The page's head is what a link shows in a chat: Discord plays the video
+//! right there from its `og:video` and `twitter:player` tags (as FxEmbed's
+//! do), with the clip's name, its game and length, and HasteClip's green
+//! down the side.
 
 use std::sync::{Arc, LazyLock};
 
 use askama::Template;
 use axum::Form;
 use axum::extract::{Path, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -28,7 +33,7 @@ pub async fn health() -> &'static str {
 }
 
 /// `/<id>`, `/<id>.mp4` or `/<id>.jpg`.
-pub async fn clip(State(app): State<Arc<App>>, Path(name): Path<String>) -> Response {
+pub async fn clip(State(app): State<Arc<App>>, method: Method, Path(name): Path<String>) -> Response {
     let (id, file) = match name.rsplit_once('.') {
         Some((id, "mp4")) => (id, Some(File::Video)),
         Some((id, "jpg")) => (id, Some(File::Thumb)),
@@ -41,6 +46,7 @@ pub async fn clip(State(app): State<Arc<App>>, Path(name): Path<String>) -> Resp
         Err(e) => return e.into_response(),
     };
     match file {
+        Some(file) if method == Method::HEAD => look(&clip, file),
         Some(file) => watch(&app, &clip, file),
         None => {
             app.views.page(&clip.id);
@@ -52,6 +58,28 @@ pub async fn clip(State(app): State<Arc<App>>, Path(name): Path<String>) -> Resp
 enum File {
     Video,
     Thumb,
+}
+
+/// What a file is, without sending anyone to it: a HEAD request, as a chat
+/// app makes to see a video before it plays it. Answered here, not by the
+/// bucket, whose links are signed for GET and refuse anything else (Discord
+/// then showed nothing at all).
+fn look(clip: &Clip, file: File) -> Response {
+    let (size, content_type) = match file {
+        File::Video => (Some(clip.size), "video/mp4"),
+        File::Thumb => (clip.thumb_size.map(i64::from), "image/jpeg"),
+    };
+    let Some(size) = size else { return gone() };
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, content_type.to_owned()),
+            (header::CONTENT_LENGTH, size.to_string()),
+            (header::ACCEPT_RANGES, "bytes".to_owned()),
+            (header::CACHE_CONTROL, "public, max-age=300".to_owned()),
+        ],
+    )
+        .into_response()
 }
 
 /// Send the browser (or Discord) on to the file in the bucket, with a link
@@ -79,13 +107,17 @@ struct ClipPage {
     title: String,
     /// What's under the title: game, length, date.
     meta: String,
-    /// For link previews: game, length, and where it's from.
+    /// For link previews: game and length (the site's name shows beside).
     description: String,
     page_url: String,
     video_url: String,
     thumb_url: Option<String>,
     width: i32,
     height: i32,
+    /// The size a chat shows it at: as recorded, halved past 1920 (as
+    /// FxEmbed does: Discord made big ones bigger than the chat).
+    embed_width: i32,
+    embed_height: i32,
 }
 
 impl ClipPage {
@@ -102,7 +134,7 @@ impl ClipPage {
             id: clip.id.clone(),
             title: clip.title.clone(),
             meta: format!("{game}{length} · {date}"),
-            description: format!("{game}{length} · Shared with HasteClip"),
+            description: format!("{game}{length}"),
             page_url: app.link(&clip.id),
             // By version: a link to a file of one that's been replaced may
             // still be cached (the server always sends the newest).
@@ -110,8 +142,15 @@ impl ClipPage {
             thumb_url: clip.thumb_key.as_ref().map(|_| app.link(&format!("{}.jpg?v={}", clip.id, clip.version))),
             width: clip.width,
             height: clip.height,
+            embed_width: embed_size(clip.width, clip.height).0,
+            embed_height: embed_size(clip.width, clip.height).1,
         }
     }
+}
+
+/// The size a chat shows a `w`×`h` clip at: halved past 1920 either way.
+fn embed_size(w: i32, h: i32) -> (i32, i32) {
+    if w > 1920 || h > 1920 { (w / 2, h / 2) } else { (w, h) }
 }
 
 #[derive(Template)]
@@ -307,5 +346,13 @@ mod tests {
         assert_eq!(duration(32_400), "0:32");
         assert_eq!(duration(65_000), "1:05");
         assert_eq!(duration(3_725_000), "1:02:05");
+    }
+
+    #[test]
+    fn big_clips_are_shown_smaller_in_a_chat() {
+        assert_eq!(embed_size(1920, 1080), (1920, 1080));
+        assert_eq!(embed_size(2560, 1440), (1280, 720));
+        assert_eq!(embed_size(1080, 1920), (1080, 1920));
+        assert_eq!(embed_size(1440, 2560), (720, 1280));
     }
 }

@@ -14,11 +14,18 @@
 <meta property="og:video" content="{{ video_url }}">
 <meta property="og:video:secure_url" content="{{ video_url }}">
 <meta property="og:video:type" content="video/mp4">
-<meta property="og:video:width" content="{{ width }}">
-<meta property="og:video:height" content="{{ height }}">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="{{ title }}">
+<meta property="og:video:width" content="{{ embed_width }}">
+<meta property="og:video:height" content="{{ embed_height }}">
+<meta property="twitter:card" content="player">
+<meta property="twitter:title" content="{{ title }}">
+<meta property="twitter:player:stream" content="{{ video_url }}">
+<meta property="twitter:player:stream:content_type" content="video/mp4">
+<meta property="twitter:player:width" content="{{ embed_width }}">
+<meta property="twitter:player:height" content="{{ embed_height }}">
+<meta property="twitter:image" content="0">
 {% endblock %}
+
+{% block theme %}#3dd68c{% endblock %}
 
 {% block main %}
 <div class="player">
