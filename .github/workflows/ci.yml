@@ -72,5 +72,5 @@ jobs:
             echo "No COOLIFY_TOKEN secret or COOLIFY_APP variable: built the image, not deploying."
             exit 0
           fi
-          curl -fsS -H "Authorization: Bearer $COOLIFY_TOKEN" \
+          curl -fsS -X POST -H "Authorization: Bearer $COOLIFY_TOKEN" \
             "https://coolify.hasteclip.com/api/v1/deploy?uuid=$COOLIFY_APP&force=false"
