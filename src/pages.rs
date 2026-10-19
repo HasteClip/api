@@ -104,8 +104,10 @@ impl ClipPage {
             meta: format!("{game}{length} · {date}"),
             description: format!("{game}{length} · Shared with HasteClip"),
             page_url: app.link(&clip.id),
-            video_url: app.link(&format!("{}.mp4", clip.id)),
-            thumb_url: clip.thumb_key.as_ref().map(|_| app.link(&format!("{}.jpg", clip.id))),
+            // By version: a link to a file of one that's been replaced may
+            // still be cached (the server always sends the newest).
+            video_url: app.link(&format!("{}.mp4?v={}", clip.id, clip.version)),
+            thumb_url: clip.thumb_key.as_ref().map(|_| app.link(&format!("{}.jpg?v={}", clip.id, clip.version))),
             width: clip.width,
             height: clip.height,
         }

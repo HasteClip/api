@@ -99,7 +99,9 @@ async fn run() -> Result<(), String> {
             Router::new()
                 .route("/v1/clips", post(api::share).get(api::list))
                 .route("/v1/clips/{id}/complete", post(api::complete))
-                .route("/v1/clips/{id}", axum::routing::delete(api::unshare))
+                .route("/v1/clips/{id}", axum::routing::delete(api::unshare).patch(api::rename))
+                .route("/v1/clips/{id}/replace", post(api::replace))
+                .route("/v1/clips/{id}/replace/complete", post(api::finish_replace))
                 .layer(limits::layer(&calls)),
         )
         .route("/{id}/report", get(pages::report_form).post(pages::report).layer(limits::layer(&reports)))

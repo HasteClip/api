@@ -22,6 +22,8 @@ pub struct Clip {
     pub views: i64,
     pub created_at: OffsetDateTime,
     pub ready_at: Option<OffsetDateTime>,
+    /// Goes up each time the clip is replaced by a new version.
+    pub version: i32,
 }
 
 impl Clip {
@@ -54,7 +56,7 @@ macro_rules! clips {
     ($rest:literal) => {
         concat!(
             "select id, uploader_id, state, video_key, thumb_key, upload_id, size, thumb_size, duration_ms, ",
-            "width, height, title, game, views, created_at, ready_at from clips ",
+            "width, height, title, game, views, created_at, ready_at, version from clips ",
             $rest
         )
     };
@@ -136,6 +138,114 @@ pub async fn mark_ready(db: &PgPool, id: &str, has_thumb: bool) -> sqlx::Result<
 
 pub async fn delete_clip(db: &PgPool, id: &str) -> sqlx::Result<()> {
     sqlx::query("delete from clips where id = $1").bind(id).execute(db).await.map(drop)
+}
+
+/// The clip was renamed in the app, or moved to another game's folder.
+pub async fn set_names(db: &PgPool, id: &str, title: &str, game: Option<&str>) -> sqlx::Result<()> {
+    sqlx::query("update clips set title = $2, game = $3 where id = $1")
+        .bind(id)
+        .bind(title)
+        .bind(game)
+        .execute(db)
+        .await
+        .map(drop)
+}
+
+/// A new version of a clip being uploaded (see `replacements`).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct Replacement {
+    pub clip_id: String,
+    pub video_key: String,
+    pub thumb_key: Option<String>,
+    pub upload_id: String,
+    pub size: i64,
+    pub thumb_size: Option<i32>,
+}
+
+/// Start replacing clip `r.id` with what `r` says (its `uploader_id` isn't
+/// used: the clip has one).
+pub async fn add_replacement(db: &PgPool, r: &NewClip<'_>) -> sqlx::Result<()> {
+    sqlx::query(
+        "insert into replacements (clip_id, video_key, thumb_key, upload_id, size, thumb_size, duration_ms, width, \
+         height, fps, title, game) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+    )
+    .bind(r.id)
+    .bind(r.video_key)
+    .bind(r.thumb_key)
+    .bind(r.upload_id)
+    .bind(r.size)
+    .bind(r.thumb_size)
+    .bind(r.duration_ms)
+    .bind(r.width)
+    .bind(r.height)
+    .bind(r.fps)
+    .bind(r.title)
+    .bind(r.game)
+    .execute(db)
+    .await
+    .map(drop)
+}
+
+pub async fn replacement(db: &PgPool, clip_id: &str) -> sqlx::Result<Option<Replacement>> {
+    sqlx::query_as("select clip_id, video_key, thumb_key, upload_id, size, thumb_size from replacements where clip_id = $1")
+        .bind(clip_id)
+        .fetch_optional(db)
+        .await
+}
+
+pub async fn delete_replacement(db: &PgPool, clip_id: &str) -> sqlx::Result<()> {
+    sqlx::query("delete from replacements where clip_id = $1").bind(clip_id).execute(db).await.map(drop)
+}
+
+/// Replacements started more than a day ago that never finished (their
+/// upload links have expired).
+pub async fn stale_replacements(db: &PgPool) -> sqlx::Result<Vec<Replacement>> {
+    sqlx::query_as(
+        "select clip_id, video_key, thumb_key, upload_id, size, thumb_size from replacements \
+         where created_at < now() - interval '1 day' order by created_at limit 500",
+    )
+    .fetch_all(db)
+    .await
+}
+
+/// The clip becomes its replacement: its files, size and details, as the
+/// next version. Its old files are retired, to be deleted `keep` seconds
+/// from now. All at once, or not at all. `has_thumb` false forgets a
+/// thumbnail that never arrived.
+pub async fn apply_replacement(db: &PgPool, clip_id: &str, has_thumb: bool, keep: f64) -> sqlx::Result<()> {
+    let mut tx = db.begin().await?;
+    sqlx::query(
+        "insert into retired_files (key, delete_after) \
+         select k, now() + make_interval(secs => $2) from clips, unnest(array[video_key, thumb_key]) as k \
+         where id = $1 and k is not null on conflict (key) do nothing",
+    )
+    .bind(clip_id)
+    .bind(keep)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "update clips set video_key = r.video_key, thumb_key = case when $2 then r.thumb_key end, \
+         thumb_size = case when $2 then r.thumb_size end, size = r.size, duration_ms = r.duration_ms, \
+         width = r.width, height = r.height, fps = r.fps, title = r.title, game = r.game, version = clips.version + 1 \
+         from replacements r where clips.id = $1 and r.clip_id = $1",
+    )
+    .bind(clip_id)
+    .bind(has_thumb)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("delete from replacements where clip_id = $1").bind(clip_id).execute(&mut *tx).await?;
+    tx.commit().await
+}
+
+/// Retired files whose time has come.
+pub async fn due_retired(db: &PgPool) -> sqlx::Result<Vec<String>> {
+    sqlx::query_scalar("select key from retired_files where delete_after < now() order by delete_after limit 500")
+        .fetch_all(db)
+        .await
+}
+
+pub async fn forget_retired(db: &PgPool, key: &str) -> sqlx::Result<()> {
+    sqlx::query("delete from retired_files where key = $1").bind(key).execute(db).await.map(drop)
 }
 
 /// Count views (`views[i]` more for `ids[i]`) and note that each was seen
@@ -343,6 +453,63 @@ mod tests {
         let mut old: Vec<String> = unwatched(&db, 90).await.unwrap().into_iter().map(|c| c.id).collect();
         old.sort();
         assert_eq!(old, ["neverseen0", "unwatched0"]);
+    }
+
+    #[sqlx::test]
+    async fn a_clip_is_renamed_and_replaced(db: PgPool) {
+        let u = someone(&db).await;
+        add_clip(&db, &new_clip("aaaaaaaaaa", u, 100)).await.unwrap();
+        mark_ready(&db, "aaaaaaaaaa", true).await.unwrap();
+        set_names(&db, "aaaaaaaaaa", "Ace clutch", None).await.unwrap();
+        let c = clip(&db, "aaaaaaaaaa").await.unwrap().unwrap();
+        assert_eq!((c.title.as_str(), c.game), ("Ace clutch", None));
+
+        let next = NewClip {
+            video_key: "clips/aaaaaaaaaa/v2.mp4",
+            thumb_key: Some("clips/aaaaaaaaaa/v2.jpg"),
+            upload_id: "upload-2",
+            size: 60,
+            duration_ms: 12_000,
+            title: "Ace clutch (trimmed)",
+            ..new_clip("aaaaaaaaaa", u, 60)
+        };
+        add_replacement(&db, &next).await.unwrap();
+        let r = replacement(&db, "aaaaaaaaaa").await.unwrap().unwrap();
+        assert_eq!((r.upload_id.as_str(), r.size), ("upload-2", 60));
+        // Until it's applied, the clip is as it was.
+        let c = clip(&db, "aaaaaaaaaa").await.unwrap().unwrap();
+        assert_eq!((c.video_key.as_str(), c.version), ("clips/x/video.mp4", 1));
+
+        apply_replacement(&db, "aaaaaaaaaa", true, 3600.0).await.unwrap();
+        let c = clip(&db, "aaaaaaaaaa").await.unwrap().unwrap();
+        assert_eq!((c.video_key.as_str(), c.thumb_key.as_deref(), c.size, c.duration_ms), ("clips/aaaaaaaaaa/v2.mp4", Some("clips/aaaaaaaaaa/v2.jpg"), 60, 12_000));
+        assert_eq!((c.title.as_str(), c.version), ("Ace clutch (trimmed)", 2));
+        assert!(replacement(&db, "aaaaaaaaaa").await.unwrap().is_none());
+        // The old files wait an hour before they go.
+        assert!(due_retired(&db).await.unwrap().is_empty());
+        sqlx::query("update retired_files set delete_after = now() - interval '1 second'").execute(&db).await.unwrap();
+        let mut due = due_retired(&db).await.unwrap();
+        due.sort();
+        assert_eq!(due, ["clips/x/thumb.jpg", "clips/x/video.mp4"]);
+        forget_retired(&db, "clips/x/video.mp4").await.unwrap();
+        assert_eq!(due_retired(&db).await.unwrap(), ["clips/x/thumb.jpg"]);
+    }
+
+    #[sqlx::test]
+    async fn replacements_that_never_finish_are_found(db: PgPool) {
+        let u = someone(&db).await;
+        for id in ["aaaaaaaaaa", "bbbbbbbbbb"] {
+            add_clip(&db, &new_clip(id, u, 1)).await.unwrap();
+            add_replacement(&db, &new_clip(id, u, 1)).await.unwrap();
+        }
+        sqlx::query("update replacements set created_at = now() - interval '2 days' where clip_id = 'aaaaaaaaaa'").execute(&db).await.unwrap();
+        let stale: Vec<String> = stale_replacements(&db).await.unwrap().into_iter().map(|r| r.clip_id).collect();
+        assert_eq!(stale, ["aaaaaaaaaa"]);
+        // A clip that goes takes its replacement with it.
+        delete_clip(&db, "bbbbbbbbbb").await.unwrap();
+        assert!(replacement(&db, "bbbbbbbbbb").await.unwrap().is_none());
+        delete_replacement(&db, "aaaaaaaaaa").await.unwrap();
+        assert!(replacement(&db, "aaaaaaaaaa").await.unwrap().is_none());
     }
 
     #[sqlx::test]

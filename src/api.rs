@@ -11,6 +11,13 @@
 //!    works.
 //!
 //! `DELETE /v1/clips/{id}` unshares; `GET /v1/clips` lists what's shared.
+//!
+//! A shared clip follows the app's: `PATCH /v1/clips/{id}` with its `title`
+//! and `game` renames it (or moves it to another game), and a new version
+//! (trimmed, edited) replaces it under the same
+//! link: `POST /v1/clips/{id}/replace` as for sharing, the parts uploaded,
+//! then `POST /v1/clips/{id}/replace/complete`. The link plays the old one
+//! until then.
 
 use std::sync::Arc;
 
@@ -114,12 +121,14 @@ pub struct Upload {
 const MAX_THUMB_BYTES: i32 = 5 * 1024 * 1024;
 const MAX_SIDE: i32 = 16_384;
 const MAX_DURATION_MS: i32 = 6 * 60 * 60 * 1000;
+/// How long a replaced version's files are kept: past the hour links to
+/// them are cached for, and a watch that started then.
+const KEEP_REPLACED_SECS: f64 = 2.0 * 60.0 * 60.0;
 
-pub async fn share(
-    State(app): State<Arc<App>>,
-    Uploader(uploader_id): Uploader,
-    Json(s): Json<Share>,
-) -> Result<(StatusCode, Json<Upload>), ApiError> {
+/// Whether a clip like `s` may be shared (or a shared one replaced by it):
+/// its size and details, and room for it among the uploader's, who has
+/// `freed` bytes more when it replaces one.
+async fn check(app: &App, uploader_id: i64, s: &Share, freed: i64) -> Result<(), ApiError> {
     let limits = &app.config.limits;
     let bad = |m: &str| ApiError::new(StatusCode::BAD_REQUEST, m);
     if s.size < 1 {
@@ -145,7 +154,7 @@ pub async fn share(
     }
 
     let (used, today) = db::usage(&app.db, uploader_id).await?;
-    if used + s.size > limits.uploader_bytes {
+    if used - freed + s.size > limits.uploader_bytes {
         return Err(ApiError::new(
             StatusCode::FORBIDDEN,
             format!(
@@ -154,13 +163,22 @@ pub async fn share(
             ),
         ));
     }
-    if today >= limits.clips_per_day {
+    // A new version isn't another clip.
+    if freed == 0 && today >= limits.clips_per_day {
         return Err(ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
             "That's a lot of clips for one day. Try again tomorrow.",
         ));
     }
+    Ok(())
+}
 
+pub async fn share(
+    State(app): State<Arc<App>>,
+    Uploader(uploader_id): Uploader,
+    Json(s): Json<Share>,
+) -> Result<(StatusCode, Json<Upload>), ApiError> {
+    check(&app, uploader_id, &s, 0).await?;
     let id = ids::clip_id();
     let video_key = format!("clips/{id}/video.mp4");
     let thumb_key = s.thumb_size.map(|_| format!("clips/{id}/thumb.jpg"));
@@ -257,6 +275,125 @@ pub async fn complete(
     };
     db::mark_ready(&app.db, &clip.id, has_thumb).await?;
     tracing::info!(clip = clip.id, size = clip.size, "shared");
+    Ok(Json(Shared { id: clip.id, url }))
+}
+
+#[derive(Deserialize)]
+pub struct Rename {
+    title: String,
+    game: Option<String>,
+}
+
+pub async fn rename(
+    State(app): State<Arc<App>>,
+    Uploader(uploader_id): Uploader,
+    Path(id): Path<String>,
+    Json(r): Json<Rename>,
+) -> Result<StatusCode, ApiError> {
+    let clip = own_clip(&app, uploader_id, &id).await?;
+    let title = clean(&r.title, 200).unwrap_or_else(|| "Clip".into());
+    let game = r.game.as_deref().and_then(|g| clean(g, 100));
+    db::set_names(&app.db, &clip.id, &title, game.as_deref()).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Start replacing a shared clip with a new version: as [`share`], for its
+/// files. One already on its way is dropped for this one.
+pub async fn replace(
+    State(app): State<Arc<App>>,
+    Uploader(uploader_id): Uploader,
+    Path(id): Path<String>,
+    Json(s): Json<Share>,
+) -> Result<(StatusCode, Json<Upload>), ApiError> {
+    let clip = own_clip(&app, uploader_id, &id).await?;
+    if !clip.is_ready() {
+        return Err(ApiError::new(StatusCode::CONFLICT, "It's still being shared. Try again once it's done."));
+    }
+    check(&app, uploader_id, &s, clip.size).await?;
+    if let Some(old) = db::replacement(&app.db, &clip.id).await? {
+        cleanup::drop_replacement(&app, &old).await.map_err(|e| ApiError::internal("replace", e))?;
+    }
+    // New names: nothing that cached the old files' links is sent to these.
+    let v = ids::clip_id();
+    let video_key = format!("clips/{id}/{v}.mp4");
+    let thumb_key = s.thumb_size.map(|_| format!("clips/{id}/{v}.jpg"));
+    let upload_id = app.storage.start_upload(&video_key).await.map_err(|e| ApiError::internal("bucket", e))?;
+    let title = clean(&s.title, 200).unwrap_or_else(|| "Clip".into());
+    let game = s.game.as_deref().and_then(|g| clean(g, 100));
+    let added = db::add_replacement(
+        &app.db,
+        &NewClip {
+            id: &clip.id,
+            uploader_id,
+            video_key: &video_key,
+            thumb_key: thumb_key.as_deref(),
+            upload_id: &upload_id,
+            size: s.size,
+            thumb_size: s.thumb_size,
+            duration_ms: s.duration_ms,
+            width: s.width,
+            height: s.height,
+            fps: s.fps,
+            title: &title,
+            game: game.as_deref(),
+        },
+    )
+    .await;
+    if let Err(e) = added {
+        let _ = app.storage.abort_upload(&video_key, &upload_id).await;
+        return Err(e.into());
+    }
+    let size = s.size as u64;
+    let parts = app.storage.part_links(&video_key, &upload_id, size);
+    let thumb = thumb_key.as_deref().zip(s.thumb_size).map(|(k, n)| app.storage.jpeg_link(k, n as u64).into());
+    Ok((
+        StatusCode::CREATED,
+        Json(Upload {
+            url: app.link(&clip.id),
+            id: clip.id,
+            part_size: storage::part_sizes(size)[0],
+            parts: parts.into_iter().map(String::from).collect(),
+            thumb,
+            expires_in: UPLOAD_LINK_LIFE.as_secs(),
+        }),
+    ))
+}
+
+/// The new version is uploaded: check it, and the link plays it from now on.
+pub async fn finish_replace(
+    State(app): State<Arc<App>>,
+    Uploader(uploader_id): Uploader,
+    Path(id): Path<String>,
+    Json(c): Json<Complete>,
+) -> Result<Json<Shared>, ApiError> {
+    let clip = own_clip(&app, uploader_id, &id).await?;
+    let url = app.link(&clip.id);
+    // Not 404: to the app that means the clip is gone.
+    let Some(r) = db::replacement(&app.db, &clip.id).await? else {
+        return Err(ApiError::new(StatusCode::CONFLICT, "No new version of it is being uploaded."));
+    };
+    if c.etags.len() != storage::part_sizes(r.size as u64).len() {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "Not every part of the clip was uploaded."));
+    }
+    app.storage
+        .finish_upload(&r.video_key, &r.upload_id, &c.etags)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::CONFLICT, format!("The upload isn't complete ({e}).")))?;
+    let whole = app.storage.size(&r.video_key).await.map_err(|e| ApiError::internal("bucket", e))? == Some(r.size as u64);
+    let mp4 = whole && is_mp4(&app.storage.head_bytes(&r.video_key, 12).await.unwrap_or_default());
+    if !mp4 {
+        let _ = cleanup::drop_replacement(&app, &r).await;
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "The new version didn't arrive as an MP4 video. Try again.",
+        ));
+    }
+    let has_thumb = match (&r.thumb_key, r.thumb_size) {
+        (Some(key), Some(size)) => app.storage.size(key).await.ok().flatten() == Some(size as u64),
+        _ => false,
+    };
+    db::apply_replacement(&app.db, &clip.id, has_thumb, KEEP_REPLACED_SECS).await?;
+    tracing::info!(clip = clip.id, size = r.size, "replaced");
     Ok(Json(Shared { id: clip.id, url }))
 }
 

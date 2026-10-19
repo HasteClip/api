@@ -22,7 +22,7 @@
 
 {% block main %}
 <div class="player">
-  <video src="/{{ id }}.mp4"{% if thumb_url.is_some() %} poster="/{{ id }}.jpg"{% endif %} width="{{ width }}" height="{{ height }}" controls playsinline preload="metadata"></video>
+  <video src="{{ video_url }}"{% if let Some(thumb) = thumb_url %} poster="{{ thumb }}"{% endif %} width="{{ width }}" height="{{ height }}" controls playsinline preload="metadata"></video>
 </div>
 <div class="info">
   <div>

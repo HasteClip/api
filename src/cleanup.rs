@@ -1,16 +1,20 @@
 //! Removing clips (unshared, taken down, expired, or never finished
-//! uploading), and the hourly sweep that finds the last two.
+//! uploading), and the hourly sweep that finds the last two, new versions
+//! that never finished uploading, and the files of replaced versions.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::App;
-use crate::db::{self, Clip};
+use crate::db::{self, Clip, Replacement};
 
 /// Delete a clip's files, then the clip. Files go first: if deleting one
 /// fails, the clip stays so it can be tried again, and nothing lingers in
-/// the bucket unnoticed.
+/// the bucket unnoticed. A new version on its way goes too.
 pub async fn remove(app: &App, clip: &Clip) -> Result<(), String> {
+    if let Some(r) = db::replacement(&app.db, &clip.id).await.map_err(|e| e.to_string())? {
+        drop_replacement(app, &r).await?;
+    }
     if let Some(upload_id) = &clip.upload_id {
         app.storage.abort_upload(&clip.video_key, upload_id).await?;
     }
@@ -19,6 +23,17 @@ pub async fn remove(app: &App, clip: &Clip) -> Result<(), String> {
         app.storage.delete(thumb).await?;
     }
     db::delete_clip(&app.db, &clip.id).await.map_err(|e| e.to_string())
+}
+
+/// Give up on a clip's new version: its upload (or what it uploaded), its
+/// thumbnail, and it. The clip stays as it was.
+pub async fn drop_replacement(app: &App, r: &Replacement) -> Result<(), String> {
+    app.storage.abort_upload(&r.video_key, &r.upload_id).await?;
+    app.storage.delete(&r.video_key).await?;
+    if let Some(thumb) = &r.thumb_key {
+        app.storage.delete(thumb).await?;
+    }
+    db::delete_replacement(&app.db, &r.clip_id).await.map_err(|e| e.to_string())
 }
 
 /// Write views every 30 seconds and sweep every hour, until the server stops.
@@ -59,5 +74,29 @@ async fn sweep(app: &App) {
     }
     if removed > 0 {
         tracing::info!(stale = stale.len(), unwatched = unwatched.len(), removed, "swept");
+    }
+    match db::stale_replacements(&app.db).await {
+        Ok(stale) => {
+            for r in &stale {
+                if let Err(e) = drop_replacement(app, r).await {
+                    tracing::warn!(clip = r.clip_id, "sweep: couldn't drop a new version: {e}");
+                }
+            }
+        }
+        Err(e) => tracing::warn!("sweep: {e}"),
+    }
+    match db::due_retired(&app.db).await {
+        Ok(keys) => {
+            for key in &keys {
+                let done = match app.storage.delete(key).await {
+                    Ok(()) => db::forget_retired(&app.db, key).await.map_err(|e| e.to_string()),
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = done {
+                    tracing::warn!(key, "sweep: couldn't delete a replaced file: {e}");
+                }
+            }
+        }
+        Err(e) => tracing::warn!("sweep: {e}"),
     }
 }
