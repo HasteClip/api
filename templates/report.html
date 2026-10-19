@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block head %}
+<title>Report a clip · HasteClip</title>
+{% endblock %}
+
+{% block main %}
+<form class="form" method="post">
+  <h1>Report “{{ title }}”</h1>
+  <p class="meta">Tell us what's wrong and we'll look at it. The person who shared it isn't told who reported it.</p>
+  <fieldset>
+    <legend>What's wrong?</legend>
+    {% for (value, label) in reasons %}
+    <label class="choice"><input type="radio" name="reason" value="{{ value }}" required> {{ label }}</label>
+    {% endfor %}
+  </fieldset>
+  <label class="field">Anything we should know <span>(optional)</span>
+    <textarea name="details" rows="4" maxlength="2000"></textarea>
+  </label>
+  <label class="field">Your email <span>(optional, so we can reply; needed for a copyright claim)</span>
+    <input type="email" name="email" maxlength="200" autocomplete="email">
+  </label>
+  <div class="actions">
+    <a class="button quiet" href="/{{ id }}">Cancel</a>
+    <button class="button" type="submit">Send report</button>
+  </div>
+</form>
+{% endblock %}

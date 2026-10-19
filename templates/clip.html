@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+
+{% block head %}
+<title>{{ title }} · HasteClip</title>
+<meta name="description" content="{{ description }}">
+<meta property="og:site_name" content="HasteClip">
+<meta property="og:type" content="video.other">
+<meta property="og:title" content="{{ title }}">
+<meta property="og:description" content="{{ description }}">
+<meta property="og:url" content="{{ page_url }}">
+{% if let Some(thumb) = thumb_url %}
+<meta property="og:image" content="{{ thumb }}">
+{% endif %}
+<meta property="og:video" content="{{ video_url }}">
+<meta property="og:video:secure_url" content="{{ video_url }}">
+<meta property="og:video:type" content="video/mp4">
+<meta property="og:video:width" content="{{ width }}">
+<meta property="og:video:height" content="{{ height }}">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{{ title }}">
+{% endblock %}
+
+{% block main %}
+<div class="player">
+  <video src="/{{ id }}.mp4"{% if thumb_url.is_some() %} poster="/{{ id }}.jpg"{% endif %} width="{{ width }}" height="{{ height }}" controls playsinline preload="metadata"></video>
+</div>
+<div class="info">
+  <div>
+    <h1>{{ title }}</h1>
+    <p class="meta">{{ meta }}</p>
+  </div>
+  <a class="report" href="/{{ id }}/report">Report</a>
+</div>
+<aside class="made">
+  <p><strong>Shared with HasteClip</strong>Keep a replay buffer running, press a key when something happens, and share it. Free, no account, no watermark.</p>
+  <a class="button quiet" href="https://hasteclip.com">See how it works</a>
+</aside>
+{% endblock %}

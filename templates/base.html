@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#111215">
+<link rel="stylesheet" href="/static/style.css?v={{ v }}">
+<link rel="icon" href="/static/glyph.svg" type="image/svg+xml">
+{% block head %}{% endblock %}
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="https://hasteclip.com"><img src="/static/glyph.svg" alt="">HasteClip</a>
+  <a class="button" href="https://hasteclip.com/download">Get HasteClip</a>
+</header>
+<main>
+{% block main %}{% endblock %}
+</main>
+<footer>
+  <a href="https://hasteclip.com">HasteClip</a> · a fast, free clip recorder for Windows, macOS and Linux
+</footer>
+</body>
+</html>
