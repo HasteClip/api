@@ -3,10 +3,11 @@
 //! The bucket is private: nothing in it can be read without a signature.
 //! Uploads go straight from the app to the bucket with links this signs
 //! (size and type are part of the signature, so they can't be changed), and
-//! watching goes through `clips.hasteclip.com/<id>.mp4`, which answers with a
-//! link to the file that expires. That's what makes Unshare final, lets a
-//! clip become private later without moving it, and lets the files move to
-//! other storage without breaking a link anyone has posted.
+//! watching goes through `clips.hasteclip.com/<id>.mp4`, which passes the
+//! video on (`/<id>.jpg` answers with a link to the thumbnail that expires).
+//! That's what makes Unshare final, lets a clip become private later without
+//! moving it, and lets the files move to other storage without breaking a
+//! link anyone has posted.
 
 use std::time::Duration;
 
@@ -42,6 +43,9 @@ pub struct Storage {
     bucket: Bucket,
     credentials: Credentials,
     http: reqwest::Client,
+    /// For files passed on as they come: no limit on the whole (a clip to a
+    /// slow connection takes a while), only on waiting for the next bytes.
+    stream: reqwest::Client,
 }
 
 pub type Result<T> = std::result::Result<T, String>;
@@ -54,7 +58,12 @@ impl Storage {
             .timeout(Duration::from_secs(60))
             .build()
             .map_err(|e| format!("http client: {e}"))?;
-        Ok(Self { bucket, credentials: Credentials::new(cfg.access_key.clone(), cfg.secret_key.clone()), http })
+        let stream = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(60))
+            .build()
+            .map_err(|e| format!("http client: {e}"))?;
+        Ok(Self { bucket, credentials: Credentials::new(cfg.access_key.clone(), cfg.secret_key.clone()), http, stream })
     }
 
     /// Where the bucket's files are served from (`https://<bucket>.<endpoint>`),
@@ -191,6 +200,21 @@ impl Storage {
         action.query_mut().insert("response-content-type", content_type.to_owned());
         action.query_mut().insert("response-cache-control", FILE_CACHE);
         action.sign_with_time(Duration::from_secs(2 * WATCH_WINDOW as u64), &window)
+    }
+
+    /// The file at `key`, or the part of it `range` asks for (a `Range`
+    /// header, passed on as it is, with `If-Range`), to pass on to whoever
+    /// asked as it comes.
+    pub async fn fetch(&self, key: &str, range: Option<&[u8]>, if_range: Option<&[u8]>) -> Result<reqwest::Response> {
+        let url = GetObject::new(&self.bucket, Some(&self.credentials), key).sign(REQUEST_LIFE);
+        let mut req = self.stream.get(url);
+        if let Some(r) = range {
+            req = req.header(reqwest::header::RANGE, r);
+        }
+        if let Some(r) = if_range {
+            req = req.header(reqwest::header::IF_RANGE, r);
+        }
+        self.send(req).await
     }
 
     async fn send(&self, req: reqwest::RequestBuilder) -> Result<reqwest::Response> {

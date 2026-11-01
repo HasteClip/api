@@ -1,6 +1,7 @@
-//! What people open: a clip's page (`/<id>`), its video and thumbnail
-//! (`/<id>.mp4`, `/<id>.jpg`, which send you on to the bucket), and the
-//! report form. No scripts, no cookies, nothing tracked but a view count.
+//! What people open: a clip's page (`/<id>`), its video (`/<id>.mp4`,
+//! passed on from the bucket) and thumbnail (`/<id>.jpg`, which sends you on
+//! to the bucket), and the report form. No scripts, no cookies, nothing
+//! tracked but a view count.
 //!
 //! The page's head is what a link shows in a chat: Discord plays the video
 //! right there from its `og:video` and `twitter:player` tags (as FxEmbed's
@@ -11,8 +12,9 @@ use std::sync::{Arc, LazyLock};
 
 use askama::Template;
 use axum::Form;
+use axum::body::Body;
 use axum::extract::{Path, State};
-use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -33,7 +35,12 @@ pub async fn health() -> &'static str {
 }
 
 /// `/<id>`, `/<id>.mp4` or `/<id>.jpg`.
-pub async fn clip(State(app): State<Arc<App>>, method: Method, Path(name): Path<String>) -> Response {
+pub async fn clip(
+    State(app): State<Arc<App>>,
+    method: Method,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
     let (id, file) = match name.rsplit_once('.') {
         Some((id, "mp4")) => (id, Some(File::Video)),
         Some((id, "jpg")) => (id, Some(File::Thumb)),
@@ -47,6 +54,7 @@ pub async fn clip(State(app): State<Arc<App>>, method: Method, Path(name): Path<
     };
     match file {
         Some(file) if method == Method::HEAD => look(&clip, file),
+        Some(File::Video) => play(&app, &clip, &headers).await,
         Some(file) => watch(&app, &clip, file),
         None => {
             app.views.page(&clip.id);
@@ -80,6 +88,44 @@ fn look(clip: &Clip, file: File) -> Response {
         ],
     )
         .into_response()
+}
+
+/// The video, passed on from the bucket as it comes (the part asked for, if
+/// any), not a link to it there: Discord's media proxy, following that link,
+/// got sent to the same link again and again by the bucket until it gave up
+/// ("Too many redirects"), so a clip never played in a chat (#28). Browsers
+/// following it never were.
+async fn play(app: &App, clip: &Clip, headers: &HeaderMap) -> Response {
+    let range = headers.get(header::RANGE).map(HeaderValue::as_bytes);
+    // A play is its start; the rest is the same play seeking or reading on.
+    if range.is_none_or(|r| r.starts_with(b"bytes=0-")) {
+        app.views.play(&clip.id);
+    }
+    let res =
+        match app.storage.fetch(&clip.video_key, range, headers.get(header::IF_RANGE).map(HeaderValue::as_bytes)).await
+        {
+            Ok(res) => res,
+            Err(e) => {
+                tracing::warn!("couldn't fetch {}: {e}", clip.video_key);
+                return StatusCode::BAD_GATEWAY.into_response();
+            }
+        };
+    let status = res.status();
+    if !(status.is_success() || status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE) {
+        tracing::warn!("couldn't fetch {}: the bucket said {status}", clip.video_key);
+        return StatusCode::BAD_GATEWAY.into_response();
+    }
+    let mut out = Response::builder().status(status.as_u16());
+    for name in [header::CONTENT_LENGTH, header::CONTENT_RANGE, header::ETAG, header::LAST_MODIFIED] {
+        if let Some(v) = res.headers().get(name.as_str()).and_then(|v| HeaderValue::from_bytes(v.as_bytes()).ok()) {
+            out = out.header(name, v);
+        }
+    }
+    out.header(header::CONTENT_TYPE, "video/mp4")
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CACHE_CONTROL, format!("public, max-age={WATCH_LINK_CACHE}"))
+        .body(Body::from_stream(res.bytes_stream()))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// Send the browser (or Discord) on to the file in the bucket, with a link
