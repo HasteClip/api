@@ -5,8 +5,8 @@
 //!
 //! The page's head is what a link shows in a chat: Discord plays the video
 //! right there from its `og:video` and `twitter:player` tags (as FxEmbed's
-//! do), with the clip's name, its game and length, and HasteClip's green
-//! down the side.
+//! do), with the clip's name, its game and length. No theme colour, so the
+//! line down its side is Discord's own, plain.
 
 use std::sync::{Arc, LazyLock};
 
