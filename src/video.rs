@@ -191,15 +191,9 @@ fn frames(stbl: &[u8], file_size: u64) -> Result<u64, String> {
     let stsz = child(stbl, b"stsz")?;
     let (each, count) = (u64::from(u32_at(stsz, 4)?), u64::from(u32_at(stsz, 8)?));
     let total = if each == 0 {
-        let sizes = stsz.get(12..).ok_or("a track's sizes are cut short")?;
-        if (sizes.len() as u64) < count * 4 {
-            return Err("a track's sizes are cut short".into());
-        }
-        sizes
-            .chunks_exact(4)
-            .take(count as usize)
-            .map(|s| u64::from(u32::from_be_bytes(s.try_into().expect("four bytes"))))
-            .sum()
+        let (sizes, _) = stsz.get(12..).ok_or("a track's sizes are cut short")?.as_chunks::<4>();
+        let sizes = sizes.get(..count as usize).ok_or("a track's sizes are cut short")?;
+        sizes.iter().map(|s| u64::from(u32::from_be_bytes(*s))).sum()
     } else {
         each * count
     };
@@ -207,22 +201,20 @@ fn frames(stbl: &[u8], file_size: u64) -> Result<u64, String> {
         return Err("a track's frames take more than the file".into());
     }
     // Where its chunks start: 32-bit offsets, or 64-bit ones.
-    let (table, wide) = match child(stbl, b"stco") {
-        Ok(t) => (t, false),
-        Err(_) => (child(stbl, b"co64")?, true),
-    };
-    let n = u32_at(table, 4)? as usize;
-    let width = if wide { 8 } else { 4 };
-    let offsets = table.get(8..8 + n * width).ok_or("a track's chunks are cut short")?;
-    for o in offsets.chunks_exact(width) {
-        let o = if wide {
-            u64::from_be_bytes(o.try_into().expect("eight bytes"))
-        } else {
-            u64::from(u32::from_be_bytes(o.try_into().expect("four bytes")))
-        };
-        if o >= file_size {
-            return Err("a track's frames are outside the file".into());
+    let cut = "a track's chunks are cut short";
+    let starts: Vec<u64> = match child(stbl, b"stco") {
+        Ok(stco) => {
+            let (o, _) = stco.get(8..).ok_or(cut)?.as_chunks::<4>();
+            o.get(..u32_at(stco, 4)? as usize).ok_or(cut)?.iter().map(|o| u64::from(u32::from_be_bytes(*o))).collect()
         }
+        Err(_) => {
+            let co64 = child(stbl, b"co64")?;
+            let (o, _) = co64.get(8..).ok_or(cut)?.as_chunks::<8>();
+            o.get(..u32_at(co64, 4)? as usize).ok_or(cut)?.iter().map(|o| u64::from_be_bytes(*o)).collect()
+        }
+    };
+    if starts.iter().any(|&o| o >= file_size) {
+        return Err("a track's frames are outside the file".into());
     }
     Ok(count)
 }
