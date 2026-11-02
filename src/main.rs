@@ -15,6 +15,7 @@ mod ids;
 mod limits;
 mod pages;
 mod storage;
+mod video;
 mod views;
 
 use std::net::SocketAddr;

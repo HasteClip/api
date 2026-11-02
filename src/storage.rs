@@ -173,10 +173,10 @@ impl Storage {
         len.map(Some).ok_or_else(|| "look at the file: no size".into())
     }
 
-    /// The first `n` bytes of the file at `key`.
-    pub async fn head_bytes(&self, key: &str, n: u64) -> Result<Vec<u8>> {
+    /// `n` bytes of the file at `key`, from `from` on (fewer at its end).
+    pub async fn read(&self, key: &str, from: u64, n: u64) -> Result<Vec<u8>> {
         let url = GetObject::new(&self.bucket, Some(&self.credentials), key).sign(REQUEST_LIFE);
-        let req = self.http.get(url).header(reqwest::header::RANGE, format!("bytes=0-{}", n - 1));
+        let req = self.http.get(url).header(reqwest::header::RANGE, format!("bytes={from}-{}", from + n.max(1) - 1));
         let res = check(self.send(req).await?, "read the file").await?;
         Ok(res.bytes().await.map_err(|e| format!("read the file: {e}"))?.to_vec())
     }

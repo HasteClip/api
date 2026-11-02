@@ -52,7 +52,7 @@ impl Config {
                 secret_key: required("S3_SECRET_KEY")?,
             },
             limits: Limits {
-                clip_bytes: number::<i64>("MAX_CLIP_MB", 1024)? * 1024 * 1024,
+                clip_bytes: number::<i64>("MAX_CLIP_MB", 100)? * 1024 * 1024,
                 uploader_bytes: number::<i64>("MAX_UPLOADER_GB", 10)? * 1024 * 1024 * 1024,
                 clips_per_day: number("MAX_CLIPS_PER_DAY", 100)?,
             },

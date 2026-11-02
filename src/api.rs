@@ -31,7 +31,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::db::{self, NewClip};
 use crate::storage::{self, UPLOAD_LINK_LIFE};
-use crate::{App, cleanup, ids};
+use crate::{App, cleanup, ids, video};
 
 /// An error the app can show as it is: `{"error": "…"}`.
 pub struct ApiError(StatusCode, String);
@@ -259,22 +259,30 @@ pub async fn complete(
         .await
         .map_err(|e| ApiError::new(StatusCode::CONFLICT, format!("The upload isn't complete ({e}).")))?;
 
-    let whole =
-        app.storage.size(&clip.video_key).await.map_err(|e| ApiError::internal("bucket", e))? == Some(clip.size as u64);
-    let mp4 = whole && is_mp4(&app.storage.head_bytes(&clip.video_key, 12).await.unwrap_or_default());
-    if !mp4 {
-        let _ = cleanup::remove(&app, &clip).await;
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "The clip didn't arrive as an MP4 video. Share it again.",
-        ));
-    }
+    let movie = match playable(&app, &clip.video_key, clip.size).await? {
+        Ok(movie) => movie,
+        Err(why) => {
+            tracing::warn!(clip = clip.id, why = %why, "refused: not a video a browser plays");
+            let _ = cleanup::remove(&app, &clip).await;
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "The clip didn't arrive as a video that plays in a browser. Share it again.",
+            ));
+        }
+    };
     let has_thumb = match (&clip.thumb_key, clip.thumb_size) {
         (Some(key), Some(size)) => app.storage.size(key).await.ok().flatten() == Some(size as u64),
         _ => false,
     };
     db::mark_ready(&app.db, &clip.id, has_thumb).await?;
-    tracing::info!(clip = clip.id, size = clip.size, "shared");
+    tracing::info!(
+        clip = clip.id,
+        size = clip.size,
+        width = movie.width,
+        height = movie.height,
+        ms = movie.duration_ms,
+        "shared"
+    );
     Ok(Json(Shared { id: clip.id, url }))
 }
 
@@ -379,22 +387,30 @@ pub async fn finish_replace(
         .finish_upload(&r.video_key, &r.upload_id, &c.etags)
         .await
         .map_err(|e| ApiError::new(StatusCode::CONFLICT, format!("The upload isn't complete ({e}).")))?;
-    let whole =
-        app.storage.size(&r.video_key).await.map_err(|e| ApiError::internal("bucket", e))? == Some(r.size as u64);
-    let mp4 = whole && is_mp4(&app.storage.head_bytes(&r.video_key, 12).await.unwrap_or_default());
-    if !mp4 {
-        let _ = cleanup::drop_replacement(&app, &r).await;
-        return Err(ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "The new version didn't arrive as an MP4 video. Try again.",
-        ));
-    }
+    let movie = match playable(&app, &r.video_key, r.size).await? {
+        Ok(movie) => movie,
+        Err(why) => {
+            tracing::warn!(clip = clip.id, why = %why, "refused a new version: not a video a browser plays");
+            let _ = cleanup::drop_replacement(&app, &r).await;
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "The new version didn't arrive as a video that plays in a browser. Try again.",
+            ));
+        }
+    };
     let has_thumb = match (&r.thumb_key, r.thumb_size) {
         (Some(key), Some(size)) => app.storage.size(key).await.ok().flatten() == Some(size as u64),
         _ => false,
     };
     db::apply_replacement(&app.db, &clip.id, has_thumb, KEEP_REPLACED_SECS).await?;
-    tracing::info!(clip = clip.id, size = r.size, "replaced");
+    tracing::info!(
+        clip = clip.id,
+        size = r.size,
+        width = movie.width,
+        height = movie.height,
+        ms = movie.duration_ms,
+        "replaced"
+    );
     Ok(Json(Shared { id: clip.id, url }))
 }
 
@@ -448,8 +464,19 @@ async fn own_clip(app: &App, uploader_id: i64, id: &str) -> Result<db::Clip, Api
 }
 
 /// Whether a file starts like an MP4 (or MOV): a box, then `ftyp`.
-fn is_mp4(start: &[u8]) -> bool {
-    start.len() >= 8 && &start[4..8] == b"ftyp"
+/// Whether the uploaded file at `key` is all there (`size` bytes) and a
+/// video a browser plays (see `video`): what it is, or why it's refused.
+/// One the bucket can't read is our fault, not the file's.
+async fn playable(app: &App, key: &str, size: i64) -> Result<Result<video::Movie, String>, ApiError> {
+    let stored = app.storage.size(key).await.map_err(|e| ApiError::internal("bucket", e))?;
+    if stored != Some(size as u64) {
+        return Ok(Err("it isn't all there".into()));
+    }
+    match video::check(size as u64, |from, len| app.storage.read(key, from, len)).await {
+        Ok(movie) => Ok(Ok(movie)),
+        Err(video::Refused::Not(why)) => Ok(Err(why)),
+        Err(video::Refused::Read(e)) => Err(ApiError::internal("bucket", e)),
+    }
 }
 
 /// Text from the app, made fit to show: control characters out, runs of
@@ -475,12 +502,5 @@ mod tests {
         assert_eq!(clean(" \n ", 200), None);
         assert_eq!(clean("ééééé", 3).as_deref(), Some("ééé"));
         assert_eq!(clean("ab cd", 3).as_deref(), Some("ab"));
-    }
-
-    #[test]
-    fn mp4_is_recognized() {
-        assert!(is_mp4(b"\0\0\0\x20ftypisom"));
-        assert!(!is_mp4(b"<html><body>"));
-        assert!(!is_mp4(b"\0\0"));
     }
 }

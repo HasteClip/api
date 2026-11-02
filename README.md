@@ -36,7 +36,7 @@ Everything comes from environment variables:
 | `S3_REGION` | `fsn1` | |
 | `S3_ENDPOINT` | `https://<region>.your-objectstorage.com` | |
 | `SHARE_URL` | `https://clips.hasteclip.com` | Where links point |
-| `MAX_CLIP_MB` | `1024` | Largest clip |
+| `MAX_CLIP_MB` | `100` | Largest clip, in MiB (the app makes a copy that fits; up to about this a link plays right in a chat) |
 | `MAX_UPLOADER_GB` | `10` | Most one app can have shared at once |
 | `MAX_CLIPS_PER_DAY` | `100` | Per app |
 | `RETENTION_DAYS` | `90` | Remove clips nobody has opened or played in this long (`0`: keep them until unshared) |
