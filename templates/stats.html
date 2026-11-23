@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+
+{% block head %}
+<title>HasteClip in numbers</title>
+<meta name="description" content="How many clips are shared with HasteClip's links, and how much they're watched.">
+{% endblock %}
+
+{% block main %}
+<div class="stats">
+  <h1>HasteClip in numbers</h1>
+  <p class="lead">Clips shared with a link from the app, as they are right now. These are totals of what the server keeps anyway, so nothing here is about anyone in particular.</p>
+
+  <dl class="tiles">
+    <div><dt>clips shared</dt><dd>{{ clips }}</dd></div>
+    <div><dt>shared in the last 7 days</dt><dd>{{ this_week }}</dd></div>
+    <div><dt>times a clip was opened</dt><dd>{{ views }}</dd></div>
+    <div><dt>of video</dt><dd>{{ video }}</dd></div>
+    <div><dt>stored</dt><dd>{{ stored }}</dd></div>
+    {% if let Some(downloads) = downloads %}<div><dt>downloads of the app</dt><dd>{{ downloads }}</dd></div>{% endif %}
+  </dl>
+
+  {% if !games.is_empty() %}
+  <h2>Most shared games</h2>
+  <ol class="games">
+    {% for (game, n) in games %}<li><span>{{ game }}</span><span>{{ n }} clips</span></li>
+    {% endfor %}
+  </ol>
+  {% endif %}
+
+  <p class="note">
+    Counted every 5 minutes. A clip stops counting when it's unshared{% if let Some(days) = retention_days %}, or when nobody has watched it for {{ days }} days{% endif %}.
+    A clip is opened when someone opens its page; playing it in a chat doesn't count.
+    Downloads are of the app's installers on GitHub, not counting updates.
+  </p>
+  <p class="note">Something not working? <a href="{{ status_page }}">See HasteClip's status</a>.</p>
+</div>
+{% endblock %}

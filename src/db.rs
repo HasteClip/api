@@ -338,6 +338,51 @@ pub async fn ban(db: &PgPool, uploader_id: i64) -> sqlx::Result<()> {
         .map(drop)
 }
 
+/// Whether the database answers (for `/readyz`).
+pub async fn ping(db: &PgPool) -> sqlx::Result<()> {
+    sqlx::query("select 1").execute(db).await.map(drop)
+}
+
+/// Totals over the clips that are shared, for the stats page.
+#[derive(Debug, Clone, Default, PartialEq, sqlx::FromRow)]
+pub struct Totals {
+    pub clips: i64,
+    /// Times a clip's page was opened.
+    pub views: i64,
+    /// Videos and thumbnails.
+    pub bytes: i64,
+    pub duration_ms: i64,
+    /// Shared (or, for an older clip, last replaced) in the last 7 days.
+    pub this_week: i64,
+}
+
+pub async fn totals(db: &PgPool) -> sqlx::Result<Totals> {
+    sqlx::query_as(
+        "select count(*) as clips, coalesce(sum(views), 0)::bigint as views, \
+         coalesce(sum(size + coalesce(thumb_size, 0)), 0)::bigint as bytes, \
+         coalesce(sum(duration_ms), 0)::bigint as duration_ms, \
+         count(*) filter (where ready_at > now() - interval '7 days') as this_week \
+         from clips where state = 'ready'",
+    )
+    .fetch_one(db)
+    .await
+}
+
+/// The `n` games with the most shared clips, and how many each has. Only
+/// games that at least `apps` different apps shared clips of: a clip's game
+/// is the app's to name, so one app can't put a name of its choosing on the
+/// stats page by sharing a hundred clips.
+pub async fn top_games(db: &PgPool, n: i64, apps: i64) -> sqlx::Result<Vec<(String, i64)>> {
+    sqlx::query_as(
+        "select game, count(*) from clips where state = 'ready' and game is not null \
+         group by game having count(distinct uploader_id) >= $2 order by count(*) desc, game limit $1",
+    )
+    .bind(n)
+    .bind(apps)
+    .fetch_all(db)
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     //! Each test gets a fresh database with the migrations run (`sqlx::test`,
@@ -530,5 +575,43 @@ mod tests {
         let open = open_reports(&db).await.unwrap();
         assert_eq!(open.len(), 1);
         assert_eq!(open[0].clip_id, "bbbbbbbbbb");
+    }
+
+    #[sqlx::test]
+    async fn the_database_answers(db: PgPool) {
+        ping(&db).await.unwrap();
+    }
+
+    #[sqlx::test]
+    async fn totals_count_only_shared_clips(db: PgPool) {
+        assert_eq!(totals(&db).await.unwrap(), Totals::default());
+        let u = someone(&db).await;
+        for (id, size) in [("aaaaaaaaaa", 100), ("bbbbbbbbbb", 200), ("cccccccccc", 400)] {
+            add_clip(&db, &new_clip(id, u, size)).await.unwrap();
+        }
+        mark_ready(&db, "aaaaaaaaaa", true).await.unwrap();
+        mark_ready(&db, "bbbbbbbbbb", false).await.unwrap();
+        age(&db, "bbbbbbbbbb", "ready_at", 8).await;
+        add_views(&db, &["aaaaaaaaaa".into(), "bbbbbbbbbb".into(), "cccccccccc".into()], &[3, 4, 5]).await.unwrap();
+        // cccccccccc is still uploading; bbbbbbbbbb has no thumbnail.
+        let t = totals(&db).await.unwrap();
+        assert_eq!(t, Totals { clips: 2, views: 7, bytes: 100 + 1000 + 200, duration_ms: 60_000, this_week: 1 });
+    }
+
+    #[sqlx::test]
+    async fn top_games_need_several_apps(db: PgPool) {
+        let (a, b, c) = (someone(&db).await, someone(&db).await, someone(&db).await);
+        // Two apps share Deadlock; one app shares many clips of a game it named.
+        let mut shares = vec![(a, Some("Deadlock")), (b, Some("Deadlock"))];
+        shares.extend([(c, Some("Mine")); 5]);
+        shares.extend([(a, Some("osu!")), (b, Some("osu!")), (c, Some("osu!")), (c, None)]);
+        for (i, (uploader, game)) in shares.into_iter().enumerate() {
+            let id = format!("{i:a>10}");
+            add_clip(&db, &NewClip { game, ..new_clip(&id, uploader, 1) }).await.unwrap();
+            mark_ready(&db, &id, false).await.unwrap();
+        }
+        assert_eq!(top_games(&db, 5, 2).await.unwrap(), [("osu!".into(), 3), ("Deadlock".into(), 2)]);
+        assert_eq!(top_games(&db, 1, 2).await.unwrap(), [("osu!".into(), 3)]);
+        assert_eq!(top_games(&db, 5, 1).await.unwrap()[0], ("Mine".into(), 5));
     }
 }

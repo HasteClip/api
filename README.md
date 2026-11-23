@@ -25,6 +25,18 @@ Nothing is stored about who watches or shares beyond:
 
 Rate limits key on IP addresses in memory only, and those addresses are never written down or logged. The pages have no scripts, cookies or analytics.
 
+`/stats` shows totals of the above (clips shared, how often they were opened, how much video), the app's downloads from GitHub, and the most shared games (only games at least three apps shared clips of). Nothing is counted for it that isn't already kept.
+
+## Status
+
+[status.hasteclip.com](https://status.hasteclip.com) (Uptime Kuma, in Coolify beside the server) checks every minute:
+
+- `/readyz`: `ok`, or a 503 saying whether the database or the bucket isn't answering. The answer is reused for 10 seconds.
+- A test clip's page (a `HEAD`, which isn't counted as a view) and its video (the first KiB). Cloudflare is told not to cache that clip's video, so each check reaches the bucket. Its checks keep it from expiring; take it down like any other with `hasteclip-api remove <clip>`.
+- hasteclip.com, and the GitHub releases the app updates from.
+
+`/healthz` is Coolify's health check and only says the server is up, so a database that's away for a minute doesn't make Coolify replace the server. `/stats` is linked from the status page.
+
 ## Settings
 
 Everything comes from environment variables:

@@ -77,14 +77,7 @@ impl Storage {
     /// Hetzner doesn't make buckets for a signed link, only for a signed
     /// request.
     pub async fn prepare(&self) -> Result<()> {
-        let head = HeadBucket::new(&self.bucket, Some(&self.credentials)).sign(REQUEST_LIFE);
-        let status = self.send(self.http.head(head)).await?.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(format!("there's no bucket called {}; make it first", self.bucket.name()));
-        } else if !status.is_success() {
-            return Err(format!("the bucket can't be reached: {status}"));
-        }
-
+        self.reachable().await?;
         let rules = r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><ID>abort-unfinished-uploads</ID><Filter><Prefix></Prefix></Filter><Status>Enabled</Status><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#;
         let md5 = base64::engine::general_purpose::STANDARD.encode(Md5::digest(rules.as_bytes()));
         // There's no lifecycle action in rusty-s3; CreateBucket is the same
@@ -95,6 +88,20 @@ impl Storage {
         let url = put.sign(REQUEST_LIFE);
         let req = self.http.put(url).header("content-md5", md5).body(rules);
         check(self.send(req).await?, "set the bucket's lifecycle rule").await.map(drop)
+    }
+
+    /// Whether the bucket is there and lets us in (for `/readyz`, and on
+    /// start).
+    pub async fn reachable(&self) -> Result<()> {
+        let head = HeadBucket::new(&self.bucket, Some(&self.credentials)).sign(REQUEST_LIFE);
+        let status = self.send(self.http.head(head)).await?.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            Err(format!("there's no bucket called {}; make it first", self.bucket.name()))
+        } else if !status.is_success() {
+            Err(format!("the bucket can't be reached: {status}"))
+        } else {
+            Ok(())
+        }
     }
 
     /// Start uploading a video in parts; returns the upload's id.

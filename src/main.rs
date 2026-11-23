@@ -14,6 +14,7 @@ mod db;
 mod ids;
 mod limits;
 mod pages;
+mod status;
 mod storage;
 mod video;
 mod views;
@@ -29,6 +30,7 @@ use axum::routing::{get, post};
 use sqlx::postgres::PgPoolOptions;
 
 use crate::config::Config;
+use crate::status::Status;
 use crate::storage::Storage;
 use crate::views::Views;
 
@@ -37,7 +39,9 @@ pub struct App {
     pub db: sqlx::PgPool,
     pub storage: Storage,
     pub views: Views,
-    /// For the report webhook.
+    /// `/readyz` and `/stats`, reused for a while.
+    pub status: Status,
+    /// For the report webhook, and the app's downloads on the stats page.
     pub http: reqwest::Client,
 }
 
@@ -75,7 +79,7 @@ async fn run() -> Result<(), String> {
     sqlx::migrate!().run(&db).await.map_err(|e| format!("migrations: {e}"))?;
     let storage = Storage::new(&config.s3)?;
     let http = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())?;
-    let app = Arc::new(App { config, db, storage, views: Views::default(), http });
+    let app = Arc::new(App { config, db, storage, views: Views::default(), status: Status::default(), http });
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if !args.is_empty() {
@@ -108,6 +112,8 @@ async fn run() -> Result<(), String> {
         .route("/{id}/report", get(pages::report_form).post(pages::report).layer(limits::layer(&reports)))
         .route("/", get(pages::home))
         .route("/healthz", get(pages::health))
+        .route("/readyz", get(status::ready))
+        .route("/stats", get(status::stats))
         .route("/static/{name}", get(pages::asset))
         .route("/{name}", get(pages::clip))
         .layer(DefaultBodyLimit::max(1024 * 1024))
