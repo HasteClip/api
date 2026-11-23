@@ -57,7 +57,11 @@ pub async fn clip(
         Some(File::Video) => play(&app, &clip, &headers).await,
         Some(file) => watch(&app, &clip, file),
         None => {
-            app.views.page(&clip.id);
+            // A HEAD isn't someone opening the page: a link checker, or the
+            // status page making sure clips' pages work.
+            if method != Method::HEAD {
+                app.views.page(&clip.id);
+            }
             page(&app, &ClipPage::new(&app, &clip))
         }
     }
@@ -324,7 +328,7 @@ impl IntoResponse for Broken {
 
 /// A page as HTML with the headers every page gets: scripts and plugins
 /// off, media only from here and the bucket, not indexed by search engines.
-fn page(app: &App, t: &impl Template) -> Response {
+pub(crate) fn page(app: &App, t: &impl Template) -> Response {
     render(t, Some(&app.storage.origin()))
 }
 
@@ -364,7 +368,7 @@ const GLYPH: &[u8] = include_bytes!("../static/glyph.svg");
 
 /// Changes whenever the stylesheet does, so pages can ask for
 /// `style.css?v=…` and browsers keep it for a week.
-fn asset_version() -> &'static str {
+pub(crate) fn asset_version() -> &'static str {
     static V: LazyLock<String> = LazyLock::new(|| {
         let hash = Sha256::digest(STYLE);
         hash[..4].iter().map(|b| format!("{b:02x}")).collect()
