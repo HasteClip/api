@@ -13,7 +13,7 @@ One Rust server ([axum](https://github.com/tokio-rs/axum)) does both jobs: it se
 
 `GET /v1/clips` lists the app's shared clips. `DELETE /v1/clips/{id}` unshares one and deletes its files.
 
-The bucket stays private. `clips.hasteclip.com/<id>.mp4` (and `.jpg`) redirects to a bucket link that expires within two hours. That's why unsharing is final, and why storage can move without breaking links people have already posted.
+The bucket stays private. `clips.hasteclip.com/<id>.mp4` passes the video on from the bucket, and `.jpg` redirects to a bucket link that expires within two hours. That's why unsharing is final, and why storage can move without breaking links people have already posted. Cloudflare is in front of the server, and videos are sent with `CDN-Cache-Control: no-store` so it doesn't keep them: an unshared or removed clip stops playing at once.
 
 ## Privacy
 
@@ -32,7 +32,7 @@ Rate limits key on IP addresses in memory only, and those addresses are never wr
 [status.hasteclip.com](https://status.hasteclip.com) (Uptime Kuma, in Coolify beside the server) checks every minute:
 
 - `/readyz`: `ok`, or a 503 saying whether the database or the bucket isn't answering. The answer is reused for 10 seconds.
-- A test clip's page (a `HEAD`, which isn't counted as a view) and its video (the first KiB). Cloudflare is told not to cache that clip's video, so each check reaches the bucket. Its checks keep it from expiring; take it down like any other with `hasteclip-api remove <clip>`.
+- A test clip's page (a `HEAD`, which isn't counted as a view) and its video (the first KiB, which reaches the bucket: Cloudflare doesn't keep videos, see below). Its checks keep it from expiring; take it down like any other with `hasteclip-api remove <clip>`.
 - hasteclip.com, and the GitHub releases the app updates from.
 
 `/healthz` is Coolify's health check and only says the server is up, so a database that's away for a minute doesn't make Coolify replace the server. `/stats` is linked from the status page.

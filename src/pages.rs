@@ -128,6 +128,10 @@ async fn play(app: &App, clip: &Clip, headers: &HeaderMap) -> Response {
     out.header(header::CONTENT_TYPE, "video/mp4")
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CACHE_CONTROL, format!("public, max-age={WATCH_LINK_CACHE}"))
+        // Cloudflare, in front, keeps .mp4s unless told not to: then a clip
+        // that's unshared or taken down would play on from its cache.
+        // Browsers and Discord still keep what they've fetched.
+        .header("cdn-cache-control", "no-store")
         .body(Body::from_stream(res.bytes_stream()))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
