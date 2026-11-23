@@ -371,10 +371,12 @@ pub async fn totals(db: &PgPool) -> sqlx::Result<Totals> {
 /// The `n` games with the most shared clips, and how many each has. Only
 /// games that at least `apps` different apps shared clips of: a clip's game
 /// is the app's to name, so one app can't put a name of its choosing on the
-/// stats page by sharing a hundred clips.
+/// stats page by sharing a hundred clips. Desktop (a clip of no game) and
+/// Other (no folder) aren't games, as the app's library says too.
 pub async fn top_games(db: &PgPool, n: i64, apps: i64) -> sqlx::Result<Vec<(String, i64)>> {
     sqlx::query_as(
         "select game, count(*) from clips where state = 'ready' and game is not null \
+         and game not in ('Desktop', 'Other') \
          group by game having count(distinct uploader_id) >= $2 order by count(*) desc, game limit $1",
     )
     .bind(n)
@@ -605,6 +607,9 @@ mod tests {
         let mut shares = vec![(a, Some("Deadlock")), (b, Some("Deadlock"))];
         shares.extend([(c, Some("Mine")); 5]);
         shares.extend([(a, Some("osu!")), (b, Some("osu!")), (c, Some("osu!")), (c, None)]);
+        // Desktop and Other aren't games, however many share them.
+        shares.extend([(a, Some("Desktop")), (b, Some("Desktop")), (c, Some("Desktop")), (a, Some("Other"))]);
+        shares.extend([(b, Some("Other")), (c, Some("Other")), (a, Some("Desktop")), (b, Some("Desktop"))]);
         for (i, (uploader, game)) in shares.into_iter().enumerate() {
             let id = format!("{i:a>10}");
             add_clip(&db, &NewClip { game, ..new_clip(&id, uploader, 1) }).await.unwrap();
