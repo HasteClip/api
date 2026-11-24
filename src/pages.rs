@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use time::macros::format_description;
 
 use crate::db::{self, Clip};
+use crate::hourly::Event;
 use crate::storage::WATCH_LINK_CACHE;
 use crate::{App, ids};
 
@@ -61,6 +62,7 @@ pub async fn clip(
             // status page making sure clips' pages work.
             if method != Method::HEAD {
                 app.views.page(&clip.id);
+                app.hourly.count(Event::Open);
             }
             page(&app, &ClipPage::new(&app, &clip))
         }
@@ -104,6 +106,9 @@ async fn play(app: &App, clip: &Clip, headers: &HeaderMap) -> Response {
     // A play is its start; the rest is the same play seeking or reading on.
     if range.is_none_or(|r| r.starts_with(b"bytes=0-")) {
         app.views.play(&clip.id);
+        if !is_status_check(headers) {
+            app.hourly.count(Event::Play);
+        }
     }
     let res =
         match app.storage.fetch(&clip.video_key, range, headers.get(header::IF_RANGE).map(HeaderValue::as_bytes)).await
@@ -134,6 +139,14 @@ async fn play(app: &App, clip: &Clip, headers: &HeaderMap) -> Response {
         .header("cdn-cache-control", "no-store")
         .body(Body::from_stream(res.bytes_stream()))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// The status page's checks (Uptime Kuma's on the server, and the ones from
+/// Cloudflare at status.hasteclip.com) start the test clip's video every
+/// minute. That keeps it from expiring, but nobody's watching it.
+fn is_status_check(headers: &HeaderMap) -> bool {
+    let agent = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or_default();
+    agent.starts_with("Uptime-Kuma") || agent.starts_with("HasteClip-Status")
 }
 
 /// Send the browser (or Discord) on to the file in the bucket, with a link
@@ -332,7 +345,7 @@ impl IntoResponse for Broken {
 
 /// A page as HTML with the headers every page gets: scripts and plugins
 /// off, media only from here and the bucket, not indexed by search engines.
-pub(crate) fn page(app: &App, t: &impl Template) -> Response {
+fn page(app: &App, t: &impl Template) -> Response {
     render(t, Some(&app.storage.origin()))
 }
 
@@ -372,7 +385,7 @@ const GLYPH: &[u8] = include_bytes!("../static/glyph.svg");
 
 /// Changes whenever the stylesheet does, so pages can ask for
 /// `style.css?v=…` and browsers keep it for a week.
-pub(crate) fn asset_version() -> &'static str {
+fn asset_version() -> &'static str {
     static V: LazyLock<String> = LazyLock::new(|| {
         let hash = Sha256::digest(STYLE);
         hash[..4].iter().map(|b| format!("{b:02x}")).collect()

@@ -343,10 +343,13 @@ pub async fn ping(db: &PgPool) -> sqlx::Result<()> {
     sqlx::query("select 1").execute(db).await.map(drop)
 }
 
-/// Totals over the clips that are shared, for the stats page.
+/// Totals over the clips that are shared, for the status page.
 #[derive(Debug, Clone, Default, PartialEq, sqlx::FromRow)]
 pub struct Totals {
     pub clips: i64,
+    /// Clips ever shared: those up, and those removed since counting began
+    /// (`hourly`'s first hour). Clips removed before that aren't known.
+    pub clips_ever: i64,
     /// Times a clip's page was opened.
     pub views: i64,
     /// Videos and thumbnails.
@@ -354,17 +357,72 @@ pub struct Totals {
     pub duration_ms: i64,
     /// Shared (or, for an older clip, last replaced) in the last 7 days.
     pub this_week: i64,
+    /// Apps that have signed up to share, ever.
+    pub apps: i64,
+    pub counted_since: Option<OffsetDateTime>,
 }
 
 pub async fn totals(db: &PgPool) -> sqlx::Result<Totals> {
     sqlx::query_as(
-        "select count(*) as clips, coalesce(sum(views), 0)::bigint as views, \
+        "select count(*) as clips, \
+         count(*) + (select coalesce(sum(removed), 0) from hourly)::bigint as clips_ever, \
+         coalesce(sum(views), 0)::bigint as views, \
          coalesce(sum(size + coalesce(thumb_size, 0)), 0)::bigint as bytes, \
          coalesce(sum(duration_ms), 0)::bigint as duration_ms, \
-         count(*) filter (where ready_at > now() - interval '7 days') as this_week \
+         count(*) filter (where ready_at > now() - interval '7 days') as this_week, \
+         (select count(*) from uploaders) as apps, \
+         (select min(hour) from hourly) as counted_since \
          from clips where state = 'ready'",
     )
     .fetch_one(db)
+    .await
+}
+
+/// An hour's totals (see `migrations/0003_hourly.sql`).
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+pub struct Hour {
+    pub hour: OffsetDateTime,
+    pub shares: i32,
+    pub opens: i32,
+    pub plays: i32,
+    pub sign_ups: i32,
+    pub refused: i32,
+    pub removed: i32,
+    pub clips: i32,
+    pub bytes: i64,
+}
+
+/// Add `n` (shares, opens, plays, sign-ups, refused, removed) to this hour's
+/// totals, and note how many clips are up now and how much they take.
+pub async fn add_hourly(db: &PgPool, n: [i32; 6]) -> sqlx::Result<()> {
+    sqlx::query(
+        "insert into hourly (hour, shares, opens, plays, sign_ups, refused, removed, clips, bytes) \
+         select date_trunc('hour', now(), 'UTC'), $1, $2, $3, $4, $5, $6, count(*), \
+         coalesce(sum(size + coalesce(thumb_size, 0)), 0) from clips where state = 'ready' \
+         on conflict (hour) do update set shares = hourly.shares + excluded.shares, \
+         opens = hourly.opens + excluded.opens, plays = hourly.plays + excluded.plays, \
+         sign_ups = hourly.sign_ups + excluded.sign_ups, refused = hourly.refused + excluded.refused, \
+         removed = hourly.removed + excluded.removed, clips = excluded.clips, bytes = excluded.bytes",
+    )
+    .bind(n[0])
+    .bind(n[1])
+    .bind(n[2])
+    .bind(n[3])
+    .bind(n[4])
+    .bind(n[5])
+    .execute(db)
+    .await
+    .map(drop)
+}
+
+/// Every hour's totals in the last `days` days, oldest first.
+pub async fn hours(db: &PgPool, days: i32) -> sqlx::Result<Vec<Hour>> {
+    sqlx::query_as(
+        "select hour, shares, opens, plays, sign_ups, refused, removed, clips, bytes from hourly \
+         where hour > now() - make_interval(days => $1) order by hour",
+    )
+    .bind(days)
+    .fetch_all(db)
     .await
 }
 
@@ -588,6 +646,7 @@ mod tests {
     async fn totals_count_only_shared_clips(db: PgPool) {
         assert_eq!(totals(&db).await.unwrap(), Totals::default());
         let u = someone(&db).await;
+        someone(&db).await;
         for (id, size) in [("aaaaaaaaaa", 100), ("bbbbbbbbbb", 200), ("cccccccccc", 400)] {
             add_clip(&db, &new_clip(id, u, size)).await.unwrap();
         }
@@ -597,7 +656,45 @@ mod tests {
         add_views(&db, &["aaaaaaaaaa".into(), "bbbbbbbbbb".into(), "cccccccccc".into()], &[3, 4, 5]).await.unwrap();
         // cccccccccc is still uploading; bbbbbbbbbb has no thumbnail.
         let t = totals(&db).await.unwrap();
-        assert_eq!(t, Totals { clips: 2, views: 7, bytes: 100 + 1000 + 200, duration_ms: 60_000, this_week: 1 });
+        let expected = Totals {
+            clips: 2,
+            clips_ever: 2,
+            views: 7,
+            bytes: 100 + 1000 + 200,
+            duration_ms: 60_000,
+            this_week: 1,
+            apps: 2,
+            counted_since: None,
+        };
+        assert_eq!(t, expected);
+    }
+
+    #[sqlx::test]
+    async fn hours_add_up_and_count_what_was_ever_shared(db: PgPool) {
+        let u = someone(&db).await;
+        add_clip(&db, &new_clip("aaaaaaaaaa", u, 100)).await.unwrap();
+        mark_ready(&db, "aaaaaaaaaa", true).await.unwrap();
+        add_hourly(&db, [1, 5, 3, 1, 0, 0]).await.unwrap();
+        add_hourly(&db, [1, 2, 0, 0, 1, 2]).await.unwrap();
+        let rows = hours(&db, 1).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        let h = &rows[0];
+        assert_eq!((h.shares, h.opens, h.plays, h.sign_ups, h.refused, h.removed), (2, 7, 3, 1, 1, 2));
+        // How many are up, and how much they take, as of the last write.
+        assert_eq!((h.clips, h.bytes), (1, 1100));
+        assert_eq!(h.hour.minute(), 0);
+
+        // An hour long gone isn't in the last day's, but its removed clips
+        // still count as shared once.
+        sqlx::query("insert into hourly (hour, removed) values (now() - interval '3 days', 4)")
+            .execute(&db)
+            .await
+            .unwrap();
+        assert_eq!(hours(&db, 1).await.unwrap().len(), 1);
+        assert_eq!(hours(&db, 7).await.unwrap().len(), 2);
+        let t = totals(&db).await.unwrap();
+        assert_eq!((t.clips, t.clips_ever), (1, 1 + 2 + 4));
+        assert!(t.counted_since.is_some());
     }
 
     #[sqlx::test]

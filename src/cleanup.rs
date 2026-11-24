@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use crate::App;
 use crate::db::{self, Clip, Replacement};
+use crate::hourly::Event;
 
 /// Delete a clip's files, then the clip. Files go first: if deleting one
 /// fails, the clip stays so it can be tried again, and nothing lingers in
@@ -22,7 +23,12 @@ pub async fn remove(app: &App, clip: &Clip) -> Result<(), String> {
     if let Some(thumb) = &clip.thumb_key {
         app.storage.delete(thumb).await?;
     }
-    db::delete_clip(&app.db, &clip.id).await.map_err(|e| e.to_string())
+    db::delete_clip(&app.db, &clip.id).await.map_err(|e| e.to_string())?;
+    // An upload that never finished was never shared, so it doesn't count.
+    if clip.is_ready() {
+        app.hourly.count(Event::Removed);
+    }
+    Ok(())
 }
 
 /// Give up on a clip's new version: its upload (or what it uploaded), its
@@ -36,7 +42,8 @@ pub async fn drop_replacement(app: &App, r: &Replacement) -> Result<(), String> 
     db::delete_replacement(&app.db, &r.clip_id).await.map_err(|e| e.to_string())
 }
 
-/// Write views every 30 seconds and sweep every hour, until the server stops.
+/// Write views and the hour's totals every 30 seconds, and sweep every hour,
+/// until the server stops.
 pub fn spawn(app: Arc<App>) {
     let views = app.clone();
     tokio::spawn(async move {
@@ -44,6 +51,7 @@ pub fn spawn(app: Arc<App>) {
         loop {
             tick.tick().await;
             views.views.write(&views.db).await;
+            views.hourly.write(&views.db).await;
         }
     });
     tokio::spawn(async move {

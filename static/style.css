@@ -191,49 +191,6 @@ h1 {
 }
 .actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 28px; }
 
-.stats { max-width: 52rem; margin: 6vh auto 0; }
-.lead { max-width: 40rem; margin: 10px 0 0; color: var(--ink-2); }
-.tiles {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 12px;
-  margin: 32px 0 0;
-}
-.tiles div {
-  display: flex;
-  flex-direction: column-reverse;
-  justify-content: flex-end;
-  padding: 18px 20px;
-  border-radius: 10px;
-  background: var(--base);
-  box-shadow: inset 0 0 0 1px var(--line);
-}
-.tiles dd {
-  margin: 0;
-  font-size: clamp(1.5rem, 1.2rem + 1.2vw, 2.25rem);
-  font-weight: 650;
-  line-height: 1.15;
-  letter-spacing: -0.02em;
-  font-variant-numeric: tabular-nums;
-}
-.tiles dt { margin-top: 4px; color: var(--ink-2); font-size: 14px; }
-.stats h2 { margin: 40px 0 12px; font-size: 1.125rem; font-weight: 600; letter-spacing: -0.01em; }
-.games {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  border-radius: 10px;
-  background: var(--base);
-  box-shadow: inset 0 0 0 1px var(--line);
-}
-.games li { display: flex; justify-content: space-between; gap: 16px; padding: 12px 20px; }
-.games li + li { border-top: 1px solid var(--line); }
-.games span:first-child { overflow-wrap: anywhere; }
-.games span:last-child { color: var(--ink-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
-.note { max-width: 40rem; margin: 28px 0 0; color: var(--ink-3); font-size: 14px; }
-.note + .note { margin-top: 10px; }
-.note a { color: var(--ink-2); }
-
 footer {
   padding-block: 24px 32px;
   color: var(--ink-3);
@@ -242,10 +199,6 @@ footer {
 }
 footer a { color: var(--ink-2); text-decoration: none; }
 footer a:hover { text-decoration: underline; }
-
-@media (max-width: 640px) {
-  .tiles { grid-template-columns: repeat(2, 1fr); }
-}
 
 @media (max-width: 480px) {
   .info { flex-direction: column; gap: 4px; }

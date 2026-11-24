@@ -1,34 +1,37 @@
-//! What status.hasteclip.com checks and links to: `/readyz`, whether the
-//! server can do its job right now, and `/stats`, a page of totals.
+//! What status.hasteclip.com reads: `/readyz`, whether the server can do its
+//! job right now, and `/stats.json`, the numbers and charts it shows.
 //!
 //! `/healthz` (in `pages.rs`) is Coolify's, and only says the server is up:
 //! a database that's away for a minute shouldn't make Coolify replace a
 //! server that's fine. `/readyz` asks the database and the bucket too.
 //!
-//! The stats are totals of what's kept anyway (see the README's Privacy):
-//! nothing about anyone in particular, and nothing new is counted for them.
-//! Both answers are reused for a while, so asking a thousand times a second
-//! costs what asking once does.
+//! The numbers are totals of what's kept anyway (see the README's Privacy)
+//! and the totals per hour in `hourly.rs`: nothing about anyone in
+//! particular. Both answers are reused for a while, so asking a thousand
+//! times a second costs what asking once does.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use askama::Template;
+use axum::Json;
 use axum::extract::State;
 use axum::http::{StatusCode, header};
-use axum::response::{IntoResponse, Response};
-use serde::Deserialize;
+use axum::response::{IntoResponse, Redirect, Response};
+use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 use crate::App;
-use crate::db::{self, Totals};
-use crate::pages::{asset_version, page};
+use crate::db;
 
 const READY_FOR: Duration = Duration::from_secs(10);
-const STATS_FOR: Duration = Duration::from_secs(5 * 60);
+const STATS_FOR: Duration = Duration::from_secs(60);
 const DOWNLOADS_FOR: Duration = Duration::from_secs(60 * 60);
 /// How long the database or the bucket may take to answer `/readyz`.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
-/// The app's releases, whose downloads the stats page counts.
+/// How far back the charts go.
+const CHART_DAYS: i32 = 30;
+/// The app's releases, whose downloads the status page shows.
 const RELEASES: &str = "https://api.github.com/repos/hasteclip/hasteclip/releases?per_page=100";
 const STATUS_PAGE: &str = "https://status.hasteclip.com";
 
@@ -36,8 +39,8 @@ const STATUS_PAGE: &str = "https://status.hasteclip.com";
 #[derive(Default)]
 pub struct Status {
     ready: Mutex<Option<(Instant, Result<(), &'static str>)>>,
-    stats: Mutex<Option<(Instant, Stats)>>,
-    downloads: Mutex<Option<(Instant, Option<i64>)>>,
+    stats: Mutex<Option<(Instant, Arc<Stats>)>>,
+    downloads: Mutex<Option<(Instant, Option<Vec<ReleaseDownloads>>)>>,
 }
 
 /// `/readyz`: `ok`, or 503 and what isn't answering. What went wrong in
@@ -83,76 +86,138 @@ async fn check(app: &App) -> Result<(), &'static str> {
     }
 }
 
-#[derive(Clone)]
+/// `/stats`, the page these numbers were on: they're on the status page now.
+pub async fn stats_page() -> Redirect {
+    Redirect::permanent(STATUS_PAGE)
+}
+
+/// What `/stats.json` answers.
+#[derive(Serialize)]
 struct Stats {
+    updated: String,
     totals: Totals,
-    games: Vec<(String, i64)>,
+    /// The most shared games.
+    games: Vec<Game>,
+    /// Every hour of the last 30 days that the server was up for, oldest
+    /// first. An hour that isn't here had nothing counted.
+    hours: Vec<Hour>,
+    /// The app's releases, newest first, and how many times each was
+    /// downloaded to install. `null` until GitHub has answered once.
+    releases: Option<Vec<ReleaseDownloads>>,
 }
 
-#[derive(Template)]
-#[template(path = "stats.html")]
-struct StatsPage {
-    v: &'static str,
-    clips: String,
-    this_week: String,
-    views: String,
-    video: String,
-    stored: String,
-    downloads: Option<String>,
-    games: Vec<(String, String)>,
-    retention_days: Option<i32>,
-    status_page: &'static str,
+#[derive(Serialize)]
+struct Totals {
+    clips: i64,
+    clips_ever: i64,
+    views: i64,
+    bytes: i64,
+    duration_ms: i64,
+    this_week: i64,
+    apps: i64,
+    /// When `clips_ever` and the hours began counting.
+    counted_since: Option<String>,
 }
 
-/// `/stats`.
+#[derive(Serialize)]
+struct Game {
+    name: String,
+    clips: i64,
+}
+
+#[derive(Serialize)]
+struct Hour {
+    hour: String,
+    shares: i32,
+    opens: i32,
+    plays: i32,
+    sign_ups: i32,
+    refused: i32,
+    removed: i32,
+    clips: i32,
+    bytes: i64,
+}
+
+#[derive(Clone, Serialize)]
+struct ReleaseDownloads {
+    tag: String,
+    published: Option<String>,
+    downloads: i64,
+}
+
+/// `/stats.json`.
 pub async fn stats(State(app): State<Arc<App>>) -> Response {
     let last = app.status.stats.lock().unwrap().clone();
     let stats = match last {
         Some((at, stats)) if at.elapsed() < STATS_FOR => stats,
         _ => match count(&app).await {
             Ok(stats) => {
+                let stats = Arc::new(stats);
                 *app.status.stats.lock().unwrap() = Some((Instant::now(), stats.clone()));
                 stats
             }
             Err(e) => {
                 tracing::error!("stats: {e}");
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Something went wrong on our side. Try again in a bit.")
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "the database" })))
                     .into_response();
             }
         },
     };
-    let t = &stats.totals;
-    let downloads = downloads(&app).await;
-    page(
-        &app,
-        &StatsPage {
-            v: asset_version(),
-            clips: thousands(t.clips),
-            this_week: thousands(t.this_week),
-            views: thousands(t.views),
-            video: hours(t.duration_ms),
-            stored: bytes(t.bytes),
-            downloads: downloads.map(thousands),
-            games: stats.games.iter().map(|(g, n)| (g.clone(), thousands(*n))).collect(),
-            retention_days: app.config.retention_days,
-            status_page: STATUS_PAGE,
-        },
-    )
+    let max_age = format!("public, max-age={}", STATS_FOR.as_secs());
+    ([(header::CACHE_CONTROL, max_age)], Json(&*stats)).into_response()
 }
 
 async fn count(app: &App) -> sqlx::Result<Stats> {
-    let (totals, games) = tokio::join!(db::totals(&app.db), db::top_games(&app.db, 5, 3));
-    Ok(Stats { totals: totals?, games: games? })
+    let (totals, games, hours, releases) = tokio::join!(
+        db::totals(&app.db),
+        db::top_games(&app.db, 5, 3),
+        db::hours(&app.db, CHART_DAYS),
+        downloads(app),
+    );
+    let t = totals?;
+    Ok(Stats {
+        updated: rfc3339(OffsetDateTime::now_utc()),
+        totals: Totals {
+            clips: t.clips,
+            clips_ever: t.clips_ever,
+            views: t.views,
+            bytes: t.bytes,
+            duration_ms: t.duration_ms,
+            this_week: t.this_week,
+            apps: t.apps,
+            counted_since: t.counted_since.map(rfc3339),
+        },
+        games: games?.into_iter().map(|(name, clips)| Game { name, clips }).collect(),
+        hours: hours?
+            .into_iter()
+            .map(|h| Hour {
+                hour: rfc3339(h.hour),
+                shares: h.shares,
+                opens: h.opens,
+                plays: h.plays,
+                sign_ups: h.sign_ups,
+                refused: h.refused,
+                removed: h.removed,
+                clips: h.clips,
+                bytes: h.bytes,
+            })
+            .collect(),
+        releases,
+    })
 }
 
-/// The app's downloads, asked of GitHub once an hour. When GitHub doesn't
-/// answer, the last count is kept (none, if it never has).
-async fn downloads(app: &App) -> Option<i64> {
-    let last = *app.status.downloads.lock().unwrap();
-    if let Some((at, n)) = last
+fn rfc3339(t: OffsetDateTime) -> String {
+    t.format(&Rfc3339).unwrap_or_default()
+}
+
+/// The app's downloads per release, asked of GitHub once an hour. When
+/// GitHub doesn't answer, the last answer is kept (none, if it never has).
+async fn downloads(app: &App) -> Option<Vec<ReleaseDownloads>> {
+    let last = app.status.downloads.lock().unwrap().clone();
+    if let Some((at, n)) = &last
         && at.elapsed() < DOWNLOADS_FOR
     {
-        return n;
+        return n.clone();
     }
     let n = match fetch_downloads(&app.http).await {
         Ok(n) => Some(n),
@@ -161,12 +226,16 @@ async fn downloads(app: &App) -> Option<i64> {
             last.and_then(|(_, n)| n)
         }
     };
-    *app.status.downloads.lock().unwrap() = Some((Instant::now(), n));
+    *app.status.downloads.lock().unwrap() = Some((Instant::now(), n.clone()));
     n
 }
 
 #[derive(Deserialize)]
 struct Release {
+    tag_name: String,
+    published_at: Option<String>,
+    #[serde(default)]
+    draft: bool,
     assets: Vec<Asset>,
 }
 
@@ -176,8 +245,8 @@ struct Asset {
     download_count: i64,
 }
 
-async fn fetch_downloads(http: &reqwest::Client) -> Result<i64, String> {
-    let mut assets = Vec::new();
+async fn fetch_downloads(http: &reqwest::Client) -> Result<Vec<ReleaseDownloads>, String> {
+    let mut releases = Vec::new();
     for n in 1..=10 {
         let res = http
             .get(format!("{RELEASES}&page={n}"))
@@ -191,16 +260,19 @@ async fn fetch_downloads(http: &reqwest::Client) -> Result<i64, String> {
         if page.is_empty() {
             break;
         }
-        assets.extend(page.into_iter().flat_map(|r| r.assets).map(|a| (a.name, a.download_count)));
+        releases.extend(page.into_iter().filter(|r| !r.draft).map(|r| {
+            let assets: Vec<(String, i64)> = r.assets.into_iter().map(|a| (a.name, a.download_count)).collect();
+            ReleaseDownloads { tag: r.tag_name, published: r.published_at, downloads: installs(&assets) }
+        }));
     }
-    Ok(installs(&assets))
+    Ok(releases)
 }
 
-/// How many times the app was downloaded to install, from its releases'
-/// files and their download counts. Updates aren't installs: on Windows
-/// they're the `.nupkg`s and on macOS the `.zip`, so neither is counted. On
-/// Linux an update downloads the same tarball as an install does, and its
-/// `.sha256` too, which a download by hand doesn't, so those come off.
+/// How many times a release was downloaded to install, from its files and
+/// their download counts. Updates aren't installs: on Windows they're the
+/// `.nupkg`s and on macOS the `.zip`, so neither is counted. On Linux an
+/// update downloads the same tarball as an install does, and its `.sha256`
+/// too, which a download by hand doesn't, so those come off.
 fn installs(assets: &[(String, i64)]) -> i64 {
     let (mut n, mut tarballs, mut checked) = (0, 0, 0);
     for (name, count) in assets {
@@ -214,64 +286,9 @@ fn installs(assets: &[(String, i64)]) -> i64 {
     n + (tarballs - checked).max(0)
 }
 
-/// `1,785`.
-fn thousands(n: i64) -> String {
-    let digits = n.unsigned_abs().to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    if n < 0 { format!("-{out}") } else { out }
-}
-
-/// `12.3 GB`, `640 MB`: as a computer's own file browser counts them
-/// (a GB is a billion bytes).
-fn bytes(n: i64) -> String {
-    let n = n as f64;
-    match n {
-        n if n >= 1e12 => format!("{:.1} TB", n / 1e12),
-        n if n >= 1e9 => format!("{:.1} GB", n / 1e9),
-        n if n >= 1e6 => format!("{:.0} MB", n / 1e6),
-        n => format!("{:.0} KB", n / 1e3),
-    }
-}
-
-/// `37 hours`, or `45 minutes` under an hour.
-fn hours(ms: i64) -> String {
-    let minutes = (ms + 30_000) / 60_000;
-    match minutes {
-        m if m < 60 => format!("{m} minute{}", if m == 1 { "" } else { "s" }),
-        m => {
-            let h = (m + 30) / 60;
-            format!("{} hour{}", thousands(h), if h == 1 { "" } else { "s" })
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn numbers_read_right() {
-        assert_eq!(thousands(0), "0");
-        assert_eq!(thousands(999), "999");
-        assert_eq!(thousands(1785), "1,785");
-        assert_eq!(thousands(1_234_567), "1,234,567");
-        assert_eq!(bytes(0), "0 KB");
-        assert_eq!(bytes(640_000_000), "640 MB");
-        assert_eq!(bytes(12_345_678_901), "12.3 GB");
-        assert_eq!(bytes(2_500_000_000_000), "2.5 TB");
-        assert_eq!(hours(0), "0 minutes");
-        assert_eq!(hours(60_000), "1 minute");
-        assert_eq!(hours(45 * 60_000), "45 minutes");
-        assert_eq!(hours(60 * 60_000), "1 hour");
-        assert_eq!(hours(37 * 3_600_000 + 10 * 60_000), "37 hours");
-        assert_eq!(hours(1500 * 3_600_000), "1,500 hours");
-    }
 
     #[test]
     fn updates_dont_count_as_downloads() {

@@ -11,6 +11,7 @@ mod api;
 mod cleanup;
 mod config;
 mod db;
+mod hourly;
 mod ids;
 mod limits;
 mod pages;
@@ -30,6 +31,7 @@ use axum::routing::{get, post};
 use sqlx::postgres::PgPoolOptions;
 
 use crate::config::Config;
+use crate::hourly::Hourly;
 use crate::status::Status;
 use crate::storage::Storage;
 use crate::views::Views;
@@ -39,6 +41,8 @@ pub struct App {
     pub db: sqlx::PgPool,
     pub storage: Storage,
     pub views: Views,
+    /// Totals per hour, for the status page's charts.
+    pub hourly: Hourly,
     /// `/readyz` and `/stats`, reused for a while.
     pub status: Status,
     /// For the report webhook, and the app's downloads on the stats page.
@@ -79,7 +83,15 @@ async fn run() -> Result<(), String> {
     sqlx::migrate!().run(&db).await.map_err(|e| format!("migrations: {e}"))?;
     let storage = Storage::new(&config.s3)?;
     let http = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().map_err(|e| e.to_string())?;
-    let app = Arc::new(App { config, db, storage, views: Views::default(), status: Status::default(), http });
+    let app = Arc::new(App {
+        config,
+        db,
+        storage,
+        views: Views::default(),
+        hourly: Hourly::default(),
+        status: Status::default(),
+        http,
+    });
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     if !args.is_empty() {
@@ -113,7 +125,8 @@ async fn run() -> Result<(), String> {
         .route("/", get(pages::home))
         .route("/healthz", get(pages::health))
         .route("/readyz", get(status::ready))
-        .route("/stats", get(status::stats))
+        .route("/stats", get(status::stats_page))
+        .route("/stats.json", get(status::stats))
         .route("/static/{name}", get(pages::asset))
         .route("/{name}", get(pages::clip))
         .layer(DefaultBodyLimit::max(1024 * 1024))
@@ -126,8 +139,9 @@ async fn run() -> Result<(), String> {
         .with_graceful_shutdown(stopped())
         .await
         .map_err(|e| e.to_string())?;
-    // Don't lose the last half minute of views.
+    // Don't lose the last half minute of views and totals.
     app.views.write(&app.db).await;
+    app.hourly.write(&app.db).await;
     Ok(())
 }
 

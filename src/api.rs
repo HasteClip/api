@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 
 use crate::db::{self, NewClip};
+use crate::hourly::Event;
 use crate::storage::{self, UPLOAD_LINK_LIFE};
 use crate::{App, cleanup, ids, video};
 
@@ -90,6 +91,7 @@ pub struct Token {
 pub async fn sign_up(State(app): State<Arc<App>>) -> Result<(StatusCode, Json<Token>), ApiError> {
     let token = ids::token();
     db::add_uploader(&app.db, &ids::token_hash(&token)).await?;
+    app.hourly.count(Event::SignUp);
     Ok((StatusCode::CREATED, Json(Token { token })))
 }
 
@@ -263,6 +265,7 @@ pub async fn complete(
         Ok(movie) => movie,
         Err(why) => {
             tracing::warn!(clip = clip.id, why = %why, "refused: not a video a browser plays");
+            app.hourly.count(Event::Refused);
             let _ = cleanup::remove(&app, &clip).await;
             return Err(ApiError::new(
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -275,6 +278,7 @@ pub async fn complete(
         _ => false,
     };
     db::mark_ready(&app.db, &clip.id, has_thumb).await?;
+    app.hourly.count(Event::Share);
     tracing::info!(
         clip = clip.id,
         size = clip.size,
