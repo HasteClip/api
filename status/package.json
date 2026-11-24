@@ -1,0 +1,16 @@
+{
+  "name": "hasteclip-status",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --test-scheduled",
+    "check": "tsc --noEmit",
+    "deploy": "wrangler d1 migrations apply hasteclip-status --remote && wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261110.1",
+    "typescript": "5.9.3",
+    "wrangler": "4.160.0"
+  }
+}

@@ -25,17 +25,21 @@ Nothing is stored about who watches or shares beyond:
 
 Rate limits key on IP addresses in memory only, and those addresses are never written down or logged. The pages have no scripts, cookies or analytics.
 
-`/stats` shows totals of the above (clips shared, how often they were opened, how much video), the app's downloads from GitHub, and the most shared games (only games at least three apps shared clips of). Nothing is counted for it that isn't already kept.
+Charts on the status page come from totals per hour (`hourly`): clips shared, pages opened, videos started, apps signed up, uploads refused and shared clips removed, and how many clips were up. Only how many, never who or which clip. The status page's own checks of the test clip aren't counted.
 
 ## Status
 
-[status.hasteclip.com](https://status.hasteclip.com) (Uptime Kuma, in Coolify beside the server) checks every minute:
+[status.hasteclip.com](https://status.hasteclip.com) is a Cloudflare Worker (`status/`), so it answers even when this server doesn't. Every minute it checks, from Cloudflare:
 
 - `/readyz`: `ok`, or a 503 saying whether the database or the bucket isn't answering. The answer is reused for 10 seconds.
-- A test clip's page (a `HEAD`, which isn't counted as a view) and its video (the first KiB, which reaches the bucket: Cloudflare doesn't keep videos, see below). Its checks keep it from expiring; take it down like any other with `hasteclip-api remove <clip>`.
+- A test clip's page (a `HEAD`, which isn't counted as a view) and its video (the first KiB, which reaches the bucket: Cloudflare doesn't keep videos, see above). Its checks keep it from expiring; take it down like any other with `hasteclip-api remove <clip>`.
 - hasteclip.com, and the GitHub releases the app updates from.
 
-`/healthz` is Coolify's health check and only says the server is up, so a database that's away for a minute doesn't make Coolify replace the server. `/stats` is linked from the status page.
+It shows `/stats.json` beside them: totals (clips up, ever shared, opened, how much video and storage, apps), the most shared games (only games at least three apps shared clips of; Desktop and Other aren't games), the last 30 days of `hourly`, and each release's downloads from GitHub (installers only, not updates). The answer is reused for a minute. `/stats` sends you to the status page.
+
+[Uptime Kuma](https://kuma.hasteclip.com), in Coolify beside this server, checks the same from here and posts to Discord when something's down; incidents written there show on the status page. When the whole server is down Kuma is too, so the Worker posts that one itself.
+
+`/healthz` is Coolify's health check and only says the server is up, so a database that's away for a minute doesn't make Coolify replace the server.
 
 ## Settings
 
@@ -83,6 +87,8 @@ hasteclip-api dismiss <clip>   # close a clip's reports and keep it up
 
 Every push to `main` runs the tests. If they pass, it builds the image, publishes it as `ghcr.io/hasteclip/api`, and tells Coolify to deploy it (see `.github/workflows/ci.yml`).
 
+Pushes that change `status/` deploy the status page to Cloudflare and apply its D1 migrations (`.github/workflows/status.yml`, with the `CLOUDFLARE_API_TOKEN` secret and `CLOUDFLARE_ACCOUNT_ID` variable). By hand: `cd status && npm ci && npx wrangler deploy`.
+
 ## License
 
-[AGPL-3.0-or-later](LICENSE). If you run a changed copy of this server for others, you have to share its source. The HasteClip name and icon aren't covered by the license; see the app's [TRADEMARKS.md](https://github.com/hasteclip/hasteclip/blob/main/TRADEMARKS.md). Hanken Grotesk (`static/`) is under the SIL Open Font License.
+[AGPL-3.0-or-later](LICENSE). If you run a changed copy of this server for others, you have to share its source. The HasteClip name and icon aren't covered by the license; see the app's [TRADEMARKS.md](https://github.com/hasteclip/hasteclip/blob/main/TRADEMARKS.md). Hanken Grotesk (`static/`, `status/public/static/`) is under the SIL Open Font License.

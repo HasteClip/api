@@ -1,0 +1,26 @@
+// status.hasteclip.com: a Cloudflare Worker, so the status page answers even
+// when HasteClip's server doesn't. See src/index.ts.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hasteclip-status",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": false,
+  "routes": [{ "pattern": "status.hasteclip.com/*", "zone_name": "hasteclip.com" }],
+  // Every minute: check each part from Cloudflare, and every fifth minute
+  // fetch the server's numbers and Uptime Kuma's incidents.
+  "triggers": { "crons": ["* * * * *"] },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "hasteclip-status",
+      "database_id": "32af8dec-3e98-490b-9970-476483529ac1",
+      "migrations_dir": "migrations"
+    }
+  ],
+  // The font and the glyph, from the share pages (../static).
+  "assets": { "directory": "public" },
+  "observability": { "enabled": true }
+  // Secret: DISCORD_WEBHOOK, told when the whole server stops answering
+  // (Uptime Kuma, on that server, can't say so itself).
+}
